@@ -181,8 +181,8 @@ model GeoUnit {
   children   GeoUnit[] @relation("GeoTree")
   centerLat  Float?
   centerLng  Float?
-  radiusKm   Float?    // service coverage radius
-  polygon    Json?     // GeoJSON for precise boundaries (optional)
+  radiusKm   Float?    // service coverage radius (used when no polygon)
+  polygon    Json?     // GeoJSON Polygon {type:'Polygon',coordinates:[[[lng,lat],...]]} — precise service boundary
   active     Boolean   @default(true)
   extraFee   Int       @default(0)
   operatingHours OperatingHours[]
@@ -212,7 +212,7 @@ model Address {
   lng           Float
   geoUnitId     String?  // deepest matched geo unit
   formatted     String?
-  description   String?  // "البيت الثالث بعد المسجد"
+  description   String?  // "البيت التالت بعد المسجد"
   landmark      String?
   contactPhone  String?
   photoUrl      String?
@@ -297,7 +297,7 @@ model Business {
   id        String         @id @default(cuid())
   nameAr    String
   taxId     String?
-  status    String         @default("ACTIVE")
+  status    String         @default("ACTIVE") // ACTIVE | SUSPENDED
   users     BusinessUser[]
   branches  BusinessBranch[]
   orders    Order[]
@@ -327,47 +327,79 @@ model ApiKey {
   id         String   @id @default(cuid())
   businessId String
   business   Business @relation(fields: [businessId], references: [id])
+  name       String?
   prefix     String   @unique
   keyHash    String
   scopes     String[]
   rateLimitPerMin Int @default(60)
+  rotatedFromId String?
   revokedAt  DateTime?
   lastUsedAt DateTime?
   createdAt  DateTime @default(now())
+  usage      ApiUsageLog[]
+}
+model ApiUsageLog {
+  id        BigInt   @id @default(autoincrement())
+  apiKeyId  String
+  apiKey    ApiKey   @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  method    String
+  path      String
+  status    Int
+  ms        Int
+  ip        String?
+  at        DateTime @default(now())
+  @@index([apiKeyId, at])
 }
 model Webhook {
   id         String   @id @default(cuid())
   businessId String
   business   Business @relation(fields: [businessId], references: [id])
   url        String
-  secret     String   // HMAC signing secret
+  secret     String   // HMAC signing secret (shown once at creation)
   events     String[]
   active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
   deliveries WebhookDelivery[]
 }
 model WebhookDelivery {
   id         String   @id @default(cuid())
   webhookId  String
-  webhook    Webhook  @relation(fields: [webhookId], references: [id])
+  webhook    Webhook  @relation(fields: [webhookId], references: [id], onDelete: Cascade)
   event      String
   payload    Json
   statusCode Int?
+  error      String?
   attempts   Int      @default(0)
   succeededAt DateTime?
   createdAt  DateTime @default(now())
+  @@index([webhookId, createdAt])
 }
 model BulkUpload {
-  id         String   @id @default(cuid())
-  businessId String
-  fileUrl    String
-  status     String   // QUEUED, PROCESSING, DONE, FAILED
-  totalRows  Int      @default(0)
-  okRows     Int      @default(0)
-  errors     Json     @default("[]")
-  createdAt  DateTime @default(now())
+  id          String   @id @default(cuid())
+  businessId  String
+  createdById String?
+  fileUrl     String
+  status      String   // QUEUED, PROCESSING, DONE, FAILED
+  totalRows   Int      @default(0)
+  okRows      Int      @default(0)
+  errors      Json     @default("[]")
+  finishedAt  DateTime?
+  createdAt   DateTime @default(now())
+  @@index([businessId, createdAt])
+}
+/** Replay protection for POSTs that create money/orders (Idempotency-Key header). */
+model IdempotencyRecord {
+  id        String   @id @default(cuid())
+  scope     String   // e.g. business:<id>, settlement:<actorId>
+  key       String
+  status    Int
+  response  Json
+  createdAt DateTime @default(now())
+  @@unique([scope, key])
 }
 
 // ---------- Pricing & config ----------
+/** Rules are versioned: editing creates a new row and deactivates the old one, so existing orders keep the exact rule they were priced with. */
 model PricingRule {
   id                String  @id @default(cuid())
   name              String
@@ -389,6 +421,9 @@ model PricingRule {
   waitingPerMinute  Int     @default(0)
   freeWaitingMinutes Int    @default(10)
   returnFeePercent  Float   @default(50)
+  supersededById    String?
+  supersededAt      DateTime?
+  createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 }
 model PackageSize {
@@ -417,7 +452,7 @@ model CommissionRule {
   max             Int?
 }
 model Setting {
-  key       String   @id // dispatch, delivery_proof, platform, referral ...
+  key       String   @id // dispatch, delivery_proof, platform, referral, tracking ...
   value     Json
   updatedAt DateTime @updatedAt
 }
@@ -426,7 +461,7 @@ model Setting {
 model Order {
   id              String        @id @default(cuid())
   code            String        @unique // human readable, e.g. MSH-250101-4F7K
-  trackingToken   String        @unique // public tracking link
+  trackingToken   String        @unique // public tracking link (128-bit random, rotatable)
   customerId      String
   customer        User          @relation("CustomerOrders", fields: [customerId], references: [id])
   businessId      String?
@@ -502,6 +537,7 @@ model OrderStop {
   arrivedAt      DateTime?
   completedAt    DateTime?
   @@index([orderId, seq])
+  @@index([geoUnitId])
 }
 model OrderStatusHistory {
   id         BigInt       @id @default(autoincrement())
@@ -568,6 +604,7 @@ model Payment {
   status      PaymentStatus @default(PENDING)
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
+  @@index([status, createdAt])
 }
 model Wallet {
   id           String          @id @default(cuid())
@@ -592,6 +629,7 @@ model WalletTransaction {
   createdAt    DateTime @default(now())
   @@index([walletId, createdAt])
   @@index([orderId])
+  @@index([type, createdAt])
 }
 model Commission {
   id         String @id @default(cuid())
@@ -601,6 +639,7 @@ model Commission {
   commission Int
   driverEarning Int
   createdAt  DateTime @default(now())
+  @@index([driverId, createdAt])
 }
 model Settlement {
   id          String   @id @default(cuid())
@@ -610,6 +649,7 @@ model Settlement {
   reference   String?
   createdById String
   createdAt   DateTime @default(now())
+  @@index([driverId, createdAt])
 }
 
 // ---------- Engagement ----------
@@ -627,6 +667,7 @@ model Coupon {
   usedCount   Int       @default(0)
   userIds     String[]
   geoUnitIds  String[]
+  businessIds String[]  @default([])
   active      Boolean   @default(true)
   redemptions CouponRedemption[]
 }
@@ -704,6 +745,7 @@ model Notification {
   pushError String?
   createdAt DateTime @default(now())
   @@index([userId, createdAt])
+  @@index([type, createdAt])
 }
 
 // ---------- Support ----------
@@ -746,6 +788,7 @@ model AuditLog {
   at         DateTime @default(now())
   @@index([entityType, entityId])
   @@index([actorId, at])
+  @@index([action, at])
 }
 model FraudSignal {
   id        String   @id @default(cuid())
