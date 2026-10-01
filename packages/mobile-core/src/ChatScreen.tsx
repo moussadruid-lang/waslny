@@ -28,7 +28,7 @@ export function ChatScreen({ orderId, myUserId, title, onBack, quickReplies = []
     try {
       const m = await api<Msg>(`/v1/chat/${orderId}/messages`, { body });
       q.setData((p) => (p && !p.some((x) => x.id === m.id) ? [...p, m] : p));
-      setText('');
+      if (body.kind === 'TEXT') setText('');
     } catch (e) { toast.show(errMsg(e), 'error'); } finally { setSending(false); }
   }
   async function sendLocation() {
@@ -62,13 +62,13 @@ export function ChatScreen({ orderId, myUserId, title, onBack, quickReplies = []
             }} />
         )}
         {quickReplies.length > 0 && (
-          <FlatList horizontal data={quickReplies} keyExtractor={(x) => x} showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 12, gap: 8, paddingBottom: 6 }}
+          <FlatList horizontal data={quickReplies} keyExtractor={(x) => x} showsHorizontalScrollIndicator={false} style={{ flexGrow: 0 }} contentContainerStyle={{ paddingHorizontal: 12, gap: 8, paddingBottom: 6 }}
             renderItem={({ item }) => <Pressable onPress={() => send({ kind: 'TEXT', body: item })} style={{ borderWidth: 1, borderColor: theme.border, borderRadius: 16, paddingHorizontal: 12, paddingVertical: 6, backgroundColor: '#fff' }}><T size={13}>{item}</T></Pressable>} />
         )}
         <View style={{ flexDirection: 'row', alignItems: 'center', padding: 8, gap: 8, borderTopWidth: 1, borderTopColor: theme.border, backgroundColor: '#fff' }}>
           <Pressable onPress={sendLocation} hitSlop={8} accessibilityLabel="إرسال الموقع"><Ionicons name="location-outline" size={26} color={theme.primary} /></Pressable>
           <TextInput value={text} onChangeText={setText} placeholder="اكتب رسالة..." placeholderTextColor="#9CA3AF" multiline maxLength={1000}
-            style={{ flex: 1, minHeight: 42, maxHeight: 120, borderWidth: 1, borderColor: theme.border, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 8, fontSize: 15, textAlign: 'right', color: theme.text }} />
+            style={{ flex: 1, minHeight: 42, maxHeight: 120, borderWidth: 1, borderColor: theme.border, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 8, fontSize: 15, color: theme.text }} />
           <Pressable disabled={!text.trim() || sending} onPress={() => send({ kind: 'TEXT', body: text.trim() })} hitSlop={8} accessibilityLabel="إرسال">
             <Ionicons name="send" size={26} color={text.trim() ? theme.primary : theme.border} style={{ transform: [{ scaleX: -1 }] }} />
           </Pressable>

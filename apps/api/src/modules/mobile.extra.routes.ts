@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { prisma } from '../lib/db.ts';
 import { ah, E } from '../lib/errors.ts';
 import { invalidateAuthCache, requireDriver } from '../middleware/auth.ts';
+import { getSetting } from './settings.ts';
 
 /** Statuses where both parties may contact each other. Phones are never exposed outside this window. */
 const CONTACT_WINDOW = ['DRIVER_ASSIGNED', 'DRIVER_GOING_TO_PICKUP', 'DRIVER_ARRIVED_PICKUP', 'PACKAGE_PICKED_UP', 'IN_DELIVERY', 'DRIVER_ARRIVED_DESTINATION', 'FAILED_DELIVERY', 'RETURNING'];
@@ -57,9 +58,10 @@ driverExtraRouter.get('/me', ah(async (req, res) => {
   });
 }));
 
-driverExtraRouter.get('/reasons', ah(async (_req, res) => {
-  const all = await prisma.failureReason.findMany({ orderBy: { code: 'asc' } });
-  res.json({ failure: all.filter((r) => r.appliesTo === 'FAILED_DELIVERY'), release: all.filter((r) => r.appliesTo === 'CANCEL_DRIVER') });
+/** Everything the driver app needs to render proof/failure/release flows correctly (all admin-configured). */
+driverExtraRouter.get('/config', ah(async (_req, res) => {
+  const [all, proof] = await Promise.all([prisma.failureReason.findMany({ orderBy: { code: 'asc' } }), getSetting('delivery_proof')]);
+  res.json({ failure: all.filter((r) => r.appliesTo === 'FAILED_DELIVERY'), release: all.filter((r) => r.appliesTo === 'CANCEL_DRIVER'), proof });
 }));
 
 driverExtraRouter.get('/orders/history', ah(async (req, res) => {

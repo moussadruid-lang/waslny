@@ -1,0 +1,47 @@
+{
+  "name": "@mashawir/mobile-driver",
+  "version": "1.0.0",
+  "private": true,
+  "main": "expo-router/entry",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "typecheck": "tsc --noEmit",
+    "build:android:preview": "eas build -p android --profile preview"
+  },
+  "dependencies": {
+    "@expo/vector-icons": "^14.0.4",
+    "@mashawir/mobile-core": "*",
+    "@react-native-async-storage/async-storage": "1.23.1",
+    "@react-native-community/netinfo": "11.4.1",
+    "expo": "~52.0.11",
+    "expo-constants": "~17.0.3",
+    "expo-device": "~7.0.1",
+    "expo-file-system": "~18.0.4",
+    "expo-image-manipulator": "~13.0.5",
+    "expo-image-picker": "~16.0.3",
+    "expo-linking": "~7.0.3",
+    "expo-location": "~18.0.2",
+    "expo-notifications": "~0.29.9",
+    "expo-router": "~4.0.9",
+    "expo-secure-store": "~14.0.0",
+    "expo-splash-screen": "~0.29.13",
+    "expo-status-bar": "~2.0.0",
+    "expo-task-manager": "~12.0.3",
+    "react": "18.3.1",
+    "react-native": "0.76.3",
+    "react-native-gesture-handler": "~2.20.2",
+    "react-native-maps": "1.18.0",
+    "react-native-safe-area-context": "4.12.0",
+    "react-native-screens": "~4.1.0",
+    "react-native-signature-canvas": "^4.7.2",
+    "react-native-webview": "13.12.5",
+    "socket.io-client": "^4.8.1"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.2",
+    "@types/react": "~18.3.12",
+    "typescript": "^5.6.3"
+  }
+}
