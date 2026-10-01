@@ -12,20 +12,24 @@ import type { ApiError } from './api';
 
 export type IconName = React.ComponentProps<typeof Ionicons>['name'];
 
-/** Every screen sits inside the safe area: never under the status bar, notch, camera or nav bar (§6). */
-export function Screen({ children, scroll, edges = ['top', 'left', 'right'], refreshing, onRefresh, padded = true, style, keyboard }: {
-  children: React.ReactNode; scroll?: boolean; edges?: Edge[]; refreshing?: boolean; onRefresh?: () => void; padded?: boolean; style?: ViewStyle; keyboard?: boolean;
+/**
+ * Every screen sits inside the safe area: never under the status bar, notch, camera or nav bar (§6).
+ * Tab screens use top edges only (the tab bar handles the bottom inset); stack screens pass 'bottom' too.
+ * Note on RTL: with forceRTL, 'left'/'start' already map to the right side, so we never hardcode textAlign:'right'.
+ */
+export function Screen({ children, scroll, edges = ['top', 'left', 'right'], refreshing, onRefresh, padded = true, style, keyboard, footer }: {
+  children: React.ReactNode; scroll?: boolean; edges?: Edge[]; refreshing?: boolean; onRefresh?: () => void; padded?: boolean; style?: ViewStyle; keyboard?: boolean; footer?: React.ReactNode;
 }) {
-  const insets = useSafeAreaInsets();
   const body = scroll ? (
-    <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={[padded && { padding: 16 }, { paddingBottom: 24 + (edges.includes('bottom') ? 0 : insets.bottom * 0) }]}
+    <ScrollView style={{ flex: 1 }} keyboardShouldPersistTaps="handled" contentContainerStyle={[padded && { padding: 16 }, { paddingBottom: 32 }]}
       refreshControl={onRefresh ? <RefreshControl refreshing={!!refreshing} onRefresh={onRefresh} colors={[theme.primary]} /> : undefined}>
       {children}
     </ScrollView>
   ) : <View style={[{ flex: 1 }, padded && { padding: 16 }]}>{children}</View>;
+  const content = <>{body}{footer ? <View style={s.footer}>{footer}</View> : null}</>;
   return (
     <SafeAreaView edges={edges} style={[{ flex: 1, backgroundColor: theme.bg }, style]}>
-      {keyboard ? <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>{body}</KeyboardAvoidingView> : body}
+      {keyboard ? <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>{content}</KeyboardAvoidingView> : content}
     </SafeAreaView>
   );
 }
@@ -43,7 +47,7 @@ export function Header({ title, onBack, right }: { title: string; onBack?: () =>
 export function T({ children, style, muted, bold, size = 15, center, numberOfLines, color }: {
   children: React.ReactNode; style?: TextStyle | TextStyle[]; muted?: boolean; bold?: boolean; size?: number; center?: boolean; numberOfLines?: number; color?: string;
 }) {
-  return <Text numberOfLines={numberOfLines} style={[{ fontSize: size, color: color ?? (muted ? theme.muted : theme.text), fontWeight: bold ? '700' : '400', textAlign: center ? 'center' : 'left', writingDirection: 'rtl', lineHeight: size * 1.45 }, style as any]}>{children}</Text>;
+  return <Text numberOfLines={numberOfLines} style={[{ fontSize: size, color: color ?? (muted ? theme.muted : theme.text), fontWeight: bold ? '700' : '400', textAlign: center ? 'center' : 'left', lineHeight: Math.round(size * 1.45) }, style as any]}>{children}</Text>;
 }
 
 export function Card({ children, style, onPress }: { children: React.ReactNode; style?: ViewStyle | ViewStyle[]; onPress?: () => void }) {
@@ -70,20 +74,20 @@ export function Button({ title, onPress, variant = 'primary', loading, disabled,
   );
 }
 
-export function Input({ label, error, hint, style, ...p }: TextInputProps & { label?: string; error?: string; hint?: string }) {
+export const Input = React.forwardRef<TextInput, TextInputProps & { label?: string; error?: string; hint?: string }>(function Input({ label, error, hint, style, ...p }, ref) {
   return (
     <View style={{ marginBottom: 12 }}>
       {label && <T size={13} muted style={{ marginBottom: 6 }}>{label}</T>}
-      <TextInput placeholderTextColor="#9CA3AF" {...p}
+      <TextInput ref={ref} placeholderTextColor="#9CA3AF" {...p}
         style={[s.input, p.multiline && { minHeight: 84, textAlignVertical: 'top', paddingTop: 12 }, error ? { borderColor: theme.danger } : null, style]} />
       {error ? <T size={12} color={theme.danger} style={{ marginTop: 4 }}>{error}</T> : hint ? <T size={12} muted style={{ marginTop: 4 }}>{hint}</T> : null}
     </View>
   );
-}
+});
 
-export function Chip({ label, selected, onPress, icon }: { label: string; selected?: boolean; onPress?: () => void; icon?: IconName }) {
+export function Chip({ label, selected, onPress, icon, disabled }: { label: string; selected?: boolean; onPress?: () => void; icon?: IconName; disabled?: boolean }) {
   return (
-    <Pressable onPress={onPress} style={[s.chip, selected && { backgroundColor: theme.primary, borderColor: theme.primary }]}>
+    <Pressable disabled={disabled} onPress={onPress} style={[s.chip, selected && { backgroundColor: theme.primary, borderColor: theme.primary }, disabled && { opacity: 0.4 }]}>
       {icon && <Ionicons name={icon} size={15} color={selected ? '#fff' : theme.text} style={{ marginEnd: 6 }} />}
       <Text style={{ color: selected ? '#fff' : theme.text, fontSize: 14, fontWeight: selected ? '700' : '500' }}>{label}</Text>
     </Pressable>
@@ -102,7 +106,7 @@ export const Spacer = ({ h = 12 }: { h?: number }) => <View style={{ height: h }
 
 export function ListItem({ icon, title, subtitle, onPress, right, danger }: { icon?: IconName; title: string; subtitle?: string; onPress?: () => void; right?: React.ReactNode; danger?: boolean }) {
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [s.listItem, pressed && { backgroundColor: '#F9FAFB' }]}>
+    <Pressable disabled={!onPress} onPress={onPress} style={({ pressed }) => [s.listItem, pressed && { backgroundColor: '#F9FAFB' }]}>
       {icon && <View style={[s.iconWrap, danger && { backgroundColor: theme.dangerSoft }]}><Ionicons name={icon} size={20} color={danger ? theme.danger : theme.primary} /></View>}
       <View style={{ flex: 1 }}>
         <T bold color={danger ? theme.danger : undefined}>{title}</T>
@@ -120,10 +124,11 @@ export function StateView({ loading, error, empty, emptyText = 'لا توجد ب
   if (loading) return <View style={s.center}><ActivityIndicator size="large" color={theme.primary} /></View>;
   if (error) {
     const icon: IconName = error.code === 'OFFLINE' ? 'cloud-offline-outline' : error.code === 'TIMEOUT' ? 'time-outline' : 'alert-circle-outline';
+    const text = error.code === 'OFFLINE' || error.code === 'TIMEOUT' ? error.message : errorText ?? error.message;
     return (
       <View style={s.center}>
         <Ionicons name={icon} size={48} color={theme.muted} />
-        <T center muted style={{ marginVertical: 12 }}>{errorText ?? error.message}</T>
+        <T center muted style={{ marginVertical: 12 }}>{text}</T>
         {onRetry && <Button title="إعادة المحاولة" icon="refresh" variant="secondary" onPress={onRetry} small />}
       </View>
     );
@@ -137,7 +142,7 @@ export function OfflineBanner() {
   const insets = useSafeAreaInsets();
   if (online) return null;
   return (
-    <View style={[s.offline, { paddingTop: insets.top + 4 }]}>
+    <View pointerEvents="none" style={[s.offline, { paddingTop: insets.top + 4 }]}>
       <Ionicons name="cloud-offline-outline" size={16} color="#fff" />
       <Text style={{ color: '#fff', fontSize: 13, marginStart: 6 }}>لا يوجد اتصال بالإنترنت</Text>
     </View>
@@ -160,7 +165,7 @@ export function Stars({ value, onChange, size = 32 }: { value: number; onChange?
   return (
     <Row gap={6} style={{ justifyContent: 'center' }}>
       {[1, 2, 3, 4, 5].map((n) => (
-        <Pressable key={n} disabled={!onChange} onPress={() => onChange?.(n)} hitSlop={6}>
+        <Pressable key={n} disabled={!onChange} onPress={() => onChange?.(n)} hitSlop={6} accessibilityLabel={`${n} نجوم`}>
           <Ionicons name={n <= value ? 'star' : 'star-outline'} size={size} color={theme.accent} />
         </Pressable>
       ))}
@@ -180,7 +185,7 @@ export const s = StyleSheet.create({
   btn: { height: 52, borderRadius: 12, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 16 },
   btnSmall: { height: 40, paddingHorizontal: 14 },
   row: { flexDirection: 'row', alignItems: 'center' },
-  input: { borderWidth: 1, borderColor: theme.border, borderRadius: 12, paddingHorizontal: 14, height: 50, fontSize: 16, color: theme.text, backgroundColor: '#fff', textAlign: 'right', writingDirection: 'rtl' },
+  input: { borderWidth: 1, borderColor: theme.border, borderRadius: 12, paddingHorizontal: 14, height: 50, fontSize: 16, color: theme.text, backgroundColor: '#fff' },
   chip: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 9, borderRadius: 20, borderWidth: 1, borderColor: theme.border, backgroundColor: '#fff', marginEnd: 8, marginBottom: 8 },
   badge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10, alignSelf: 'flex-start' },
   listItem: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 14, paddingHorizontal: 4 },
@@ -188,4 +193,5 @@ export const s = StyleSheet.create({
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32, minHeight: 240 },
   offline: { position: 'absolute', top: 0, left: 0, right: 0, zIndex: 999, backgroundColor: '#374151', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingBottom: 6 },
   logo: { width: 88, height: 88, borderRadius: 24, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
+  footer: { padding: 16, paddingTop: 10, backgroundColor: theme.card, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.border },
 });
