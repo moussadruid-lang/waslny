@@ -1,22 +1,21 @@
 import { Router } from 'express';
+import rateLimit from 'express-rate-limit';
 import { prisma } from '../lib/db.ts';
 import { ah, E } from '../lib/errors.ts';
-import { STATUS_MESSAGES_AR } from '@mashawir/domain';
+import { isTokenShape, publicTrackingView } from './tracking.ts';
 
-/** Public tracking: no auth, no phones, no full addresses. Driver position only while en route. */
+/** Public, unauthenticated endpoints. Strictly rate limited; never return PII or internal ids. */
 export const publicRouter = Router();
+publicRouter.use(rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: true }));
+
 publicRouter.get('/track/:token', ah(async (req, res) => {
-  const o = await prisma.order.findUnique({ where: { trackingToken: req.params.token }, include: {
-    stops: { orderBy: { seq: 'asc' }, select: { type: true, lat: true, lng: true, geoUnitId: true } },
-    history: { orderBy: { at: 'asc' }, select: { toStatus: true, at: true } },
-    driver: { select: { lastLat: true, lastLng: true, user: { select: { name: true } } } } } });
-  if (!o) throw E.notFound('الطلب');
-  const showDriver = ['DRIVER_GOING_TO_PICKUP', 'PACKAGE_PICKED_UP', 'IN_DELIVERY', 'DRIVER_ARRIVED_DESTINATION'].includes(o.status);
-  const round = (n: number) => Math.round(n * 1000) / 1000; // ~100m precision for stops
-  res.json({
-    brand: 'مشاوير', code: o.code, status: o.status, statusAr: STATUS_MESSAGES_AR[o.status],
-    timeline: o.history.map((h) => ({ status: h.toStatus, statusAr: STATUS_MESSAGES_AR[h.toStatus], at: h.at })),
-    destination: o.stops.filter((s) => s.type === 'DROPOFF').map((s) => ({ lat: round(s.lat), lng: round(s.lng) })),
-    driver: showDriver && o.driver ? { firstName: o.driver.user.name?.split(' ')[0], lat: o.driver.lastLat, lng: o.driver.lastLng } : null,
-  });
+  if (!isTokenShape(req.params.token)) throw E.notFound('الطلب');
+  res.set('Cache-Control', 'no-store');
+  res.json(await publicTrackingView({ trackingToken: req.params.token }));
+}));
+
+/** Active service areas (names + levels only) — used by the merchant order form. */
+publicRouter.get('/geo', ah(async (req, res) => {
+  const parentId = req.query.parentId ? String(req.query.parentId) : null;
+  res.json(await prisma.geoUnit.findMany({ where: { active: true, parentId }, select: { id: true, nameAr: true, level: true }, orderBy: { nameAr: 'asc' }, take: 500 }));
 }));
