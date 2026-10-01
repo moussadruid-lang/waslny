@@ -1,0 +1,1 @@
+export async function api<T>(path:string,init?:RequestInit):Promise<T>{const r=await fetch(`/api/v1/${path.replace(/^\//,'')}`,{...init,credentials:'include',headers:{'content-type':'application/json',...(init?.headers||{})},cache:'no-store'});if(!r.ok)throw new Error((await r.json().catch(()=>null))?.error?.message||'تعذر تحميل البيانات');return r.json()}

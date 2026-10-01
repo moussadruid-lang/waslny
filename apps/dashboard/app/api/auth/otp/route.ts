@@ -1,0 +1,1 @@
+import {NextResponse} from 'next/server';export async function POST(req:Request){const b=await req.json();const r=await fetch(`${process.env.NEXT_PUBLIC_API_URL||'http://localhost:4000'}/v1/auth/otp/request`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)});return NextResponse.json(await r.json(),{status:r.status})}
