@@ -1,0 +1,8 @@
+{
+  "name": "@mashawir/dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": { "dev": "next dev", "build": "next build", "start": "next start", "typecheck": "tsc --noEmit" },
+  "dependencies": { "@mashawir/dashboard-ui": "*", "next": "^15.0.4", "react": "^19.0.0", "react-dom": "^19.0.0", "recharts": "^2.13.3" },
+  "devDependencies": { "@types/node": "^22.10.1", "@types/react": "^19.0.2", "@types/react-dom": "^19.0.2", "typescript": "^5.7.2" }
+}

@@ -1,0 +1,1 @@
+{"name":"@mashawir/dashboard-ui","version":"1.0.0","private":true,"main":"src/index.tsx","types":"src/index.tsx","peerDependencies":{"next":"*","react":"*","react-dom":"*"},"dependencies":{"recharts":"^2.13.3"}}
