@@ -2,6 +2,7 @@
 import React,{useState} from 'react';
 import {api,errMsg} from './lib';
 export * from './lib';
+export * from './business';
 export function Login({login,request}:{login:(phone:string,code:string)=>Promise<void>;request:(phone:string)=>Promise<string|undefined>}){const[phone,setPhone]=useState('');const[code,setCode]=useState('');const[dev,setDev]=useState('');const[err,setErr]=useState('');const[step,setStep]=useState(0);return <div className="login"><div className="card"><h1>مشاوير</h1><p className="muted">لوحة الإدارة والتشغيل</p>{step===0?<><label>رقم الموبايل المصري</label><input className="input" value={phone} onChange={e=>setPhone(e.target.value)} placeholder="01XXXXXXXXX"/><button className="btn" style={{width:'100%',marginTop:10}} onClick={async()=>{try{setDev(await request(phone)||'');setStep(1)}catch(e){setErr(errMsg(e))}}}>إرسال الكود</button></>:<><label>كود الدخول</label><input className="input" value={code} onChange={e=>setCode(e.target.value)}/><p className="muted">{dev?`كود التطوير: ${dev}`:''}</p><button className="btn" style={{width:'100%',marginTop:10}} onClick={async()=>{try{await login(phone,code)}catch(e){setErr(errMsg(e))}}}>دخول</button></>}{err&&<div className="error" style={{marginTop:10}}>{err}</div>}</div></div>}
 export interface Staff{id:string;name?:string|null;phone:string;roles:string[];perms:string[];businesses:any[]}
 export interface ApiError extends Error{code?:string;status?:number}
