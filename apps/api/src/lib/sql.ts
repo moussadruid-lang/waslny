@@ -1,11 +1,16 @@
 import { Prisma } from '@prisma/client';
+import { E } from './errors.ts';
 
 export interface OrderFilters { from: Date; to: Date; geoUnitId?: string; businessId?: string; driverId?: string; statuses?: string[] }
 
+const MAX_RANGE_DAYS = 400;
+
+/** Date range from ?from&to (ISO). Invalid / reversed / huge ranges are a 400, never a 500 or a full-table scan. */
 export function parseRange(q: any, days = 30) {
   const to = q.to ? new Date(String(q.to)) : new Date();
   const from = q.from ? new Date(String(q.from)) : new Date(to.getTime() - days * 86400_000);
-  if (Number.isNaN(+from) || Number.isNaN(+to) || from > to) throw Object.assign(new Error('bad range'), { status: 400 });
+  if (Number.isNaN(+from) || Number.isNaN(+to) || from > to) throw E.bad('BAD_RANGE', 'نطاق التاريخ غير صالح');
+  if (+to - +from > MAX_RANGE_DAYS * 86400_000) throw E.bad('RANGE_TOO_LONG', `أقصى نطاق ${MAX_RANGE_DAYS} يوم`);
   return { from, to };
 }
 
@@ -35,9 +40,12 @@ export function orderWherePrisma(f: OrderFilters): Prisma.OrderWhereInput {
 
 /** BigInt → Number for JSON. */
 export const num = (r: Record<string, unknown>) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, typeof v === 'bigint' ? Number(v) : v]));
+/** Deep BigInt-safe JSON (AuditLog / DriverLocation ids). */
+export const json = <T>(v: T): T => JSON.parse(JSON.stringify(v, (_k, x) => (typeof x === 'bigint' ? x.toString() : x)));
 
 export function paging(q: any, max = 100) {
   const limit = Math.min(Math.max(Number(q.limit) || 25, 1), max);
   const page = Math.max(Number(q.page) || 1, 1);
   return { take: limit, skip: (page - 1) * limit, page, limit };
 }
+export const pageOut = <T>(items: T[], total: number, p: { page: number; limit: number }) => ({ items, total, page: p.page, limit: p.limit, pages: Math.max(1, Math.ceil(total / p.limit)) });
