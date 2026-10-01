@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16
+    environment: { POSTGRES_USER: mashawir, POSTGRES_PASSWORD: mashawir, POSTGRES_DB: mashawir_dev }
+    ports: ["5432:5432"]
+    volumes: [pg:/var/lib/postgresql/data]
+  postgres_test:
+    image: postgres:16
+    environment: { POSTGRES_USER: mashawir, POSTGRES_PASSWORD: mashawir, POSTGRES_DB: mashawir_test }
+    ports: ["5433:5432"]
+    tmpfs: [/var/lib/postgresql/data]
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]
+volumes: { pg: {} }

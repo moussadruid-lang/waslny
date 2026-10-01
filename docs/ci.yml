@@ -1,0 +1,29 @@
+# Move this file to .github/workflows/ci.yml to enable CI (needs the GitHub 'workflow' permission).
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: mashawir, POSTGRES_PASSWORD: mashawir, POSTGRES_DB: mashawir_test }
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+    env:
+      DATABASE_URL: postgresql://mashawir:mashawir@localhost:5432/mashawir_test
+      REDIS_URL: redis://localhost:6379
+      JWT_SECRET: ci-secret-ci-secret-ci-secret-ci-secret
+      OTP_PEPPER: ci-pepper-1234567890
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm install
+      - run: npx prisma generate --schema apps/api/prisma/schema.prisma
+      - run: npm run test:domain
+      - run: npm run typecheck -w @mashawir/api
+      - run: npm test -w @mashawir/api

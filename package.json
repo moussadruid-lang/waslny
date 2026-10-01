@@ -1,0 +1,13 @@
+{
+  "name": "mashawir",
+  "private": true,
+  "description": "مشاوير — نوصلها لك. Delivery platform for Egypt.",
+  "workspaces": ["packages/*", "apps/*"],
+  "scripts": {
+    "dev": "npm run dev -w @mashawir/api",
+    "worker": "npm run worker -w @mashawir/api",
+    "test": "npm test -w @mashawir/domain && npm test -w @mashawir/api",
+    "test:domain": "npm test -w @mashawir/domain"
+  },
+  "engines": { "node": ">=22.6" }
+}
