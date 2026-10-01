@@ -6,8 +6,11 @@
   "scripts": {
     "dev": "npm run dev -w @mashawir/api",
     "worker": "npm run worker -w @mashawir/api",
+    "customer": "npm start -w @mashawir/mobile-customer",
+    "driver": "npm start -w @mashawir/mobile-driver",
     "test": "npm test -w @mashawir/domain && npm test -w @mashawir/api",
-    "test:domain": "npm test -w @mashawir/domain"
+    "test:domain": "npm test -w @mashawir/domain",
+    "typecheck:mobile": "npm run typecheck -w @mashawir/mobile-customer && npm run typecheck -w @mashawir/mobile-driver"
   },
   "engines": { "node": ">=22.6" }
 }

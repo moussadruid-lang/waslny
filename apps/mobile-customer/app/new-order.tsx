@@ -37,13 +37,14 @@ export default function NewOrder() {
   const [urgent, setUrgent] = useState(false);
   const [coupon, setCoupon] = useState('');
   const [appliedCoupon, setAppliedCoupon] = useState<string>();
+  const [couponErr, setCouponErr] = useState<string>();
   const [payment, setPayment] = useState<'CASH' | 'WALLET'>('CASH');
   const [quote, setQuote] = useState<Quote>();
   const [quoteErr, setQuoteErr] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
-  // Prefill from saved address shortcuts on Home
+  // Prefill from saved address shortcuts on Home / Addresses
   useEffect(() => {
     if (!params.pickupId && !params.dropoffId) return;
     api<any[]>('/v1/customer/addresses').then((list) => {
@@ -54,7 +55,6 @@ export default function NewOrder() {
     }).catch(() => {});
   }, [params.pickupId, params.dropoffId]);
 
-  // Sensible defaults once the catalog loads
   useEffect(() => {
     if (!cat.data) return;
     setCategory((c) => c ?? cat.data!.categories[0]?.code);
@@ -63,7 +63,7 @@ export default function NewOrder() {
 
   const w = Number(weight.replace(',', '.')) || 0;
   const vehicles = useMemo(() => (cat.data?.vehicles ?? []).filter((v) => (!size || v.allowedSizes.includes(size)) && v.maxKg >= w), [cat.data, size, w]);
-  useEffect(() => { if (vehicle && !vehicles.some((v) => v.code === vehicle)) setVehicle(undefined); if (!vehicle && vehicles[0]) setVehicle(vehicles[0].code); }, [vehicles, vehicle]);
+  useEffect(() => { if (vehicle && !vehicles.some((v) => v.code === vehicle)) setVehicle(undefined); else if (!vehicle && vehicles[0]) setVehicle(vehicles[0].code); }, [vehicles, vehicle]);
 
   const stop = (s: StopForm) => ({
     lat: s.lat!, lng: s.lng!, formatted: s.formatted || undefined, description: s.description || undefined, landmark: s.landmark || undefined,
@@ -95,25 +95,37 @@ export default function NewOrder() {
     return Object.keys(e).length === 0;
   }
 
-  async function fetchQuote(couponCode?: string) {
-    setQuoteErr(undefined); setBusy(true);
-    try { const q = await api<Quote>('/v1/customer/quote', { body: body(couponCode) }); setQuote(q); setAppliedCoupon(couponCode); return true; }
-    catch (e) { setQuoteErr(errMsg(e)); return false; }
+  /** Server is the only source of truth for price (§12). Returns an error message or null. */
+  async function fetchQuote(couponCode?: string): Promise<string | null> {
+    setBusy(true);
+    try { const q = await api<Quote>('/v1/customer/quote', { body: body(couponCode) }); setQuote(q); setAppliedCoupon(couponCode); setQuoteErr(undefined); return null; }
+    catch (e) { return errMsg(e); }
     finally { setBusy(false); }
   }
 
   async function next() {
     if (!validate(step)) return;
-    if (step === 2) { setQuote(undefined); setStep(3); await fetchQuote(appliedCoupon); return; }
+    if (step === 2) {
+      setQuote(undefined); setStep(3);
+      let err = await fetchQuote(appliedCoupon);
+      if (err && appliedCoupon) { setCouponErr(err); setAppliedCoupon(undefined); err = await fetchQuote(undefined); }
+      if (err) setQuoteErr(err);
+      return;
+    }
     setStep(step + 1);
   }
 
   async function applyCoupon() {
     const c = coupon.trim().toUpperCase();
     if (!c) return;
-    const ok = await fetchQuote(c);
-    if (ok) toast.show('تم تطبيق كود الخصم');
-    else { await fetchQuote(undefined); setQuoteErr((m) => m); }
+    setCouponErr(undefined);
+    const err = await fetchQuote(c); // on failure the previous quote stays as-is
+    if (err) setCouponErr(err); else toast.show('تم تطبيق كود الخصم');
+  }
+  async function removeCoupon() {
+    setCoupon(''); setCouponErr(undefined);
+    const err = await fetchQuote(undefined);
+    if (err) setQuoteErr(err);
   }
 
   async function confirm() {
@@ -208,7 +220,7 @@ export default function NewOrder() {
           </Card>
           <Card>
             <T bold style={{ marginBottom: 8 }}>المركبة</T>
-            {vehicles.length === 0 ? <T color={theme.danger}>{'مفيش مركبة تناسب الحجم/الوزن ده، غيّر الحجم أو الوزن'}</T> : (
+            {vehicles.length === 0 ? <T color={theme.danger}>مفيش مركبة تناسب الحجم/الوزن ده، غيّر الحجم أو الوزن</T> : (
               <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>{vehicles.map((v) => <Chip key={v.code} icon={VEHICLE_ICON[v.code] ?? 'car-outline'} label={v.nameAr} selected={vehicle === v.code} onPress={() => setVehicle(v.code)} />)}</View>
             )}
           </Card>
@@ -248,7 +260,7 @@ export default function NewOrder() {
       {step === 3 && (
         <>
           {busy && !quote ? <StateView loading /> : quoteErr && !quote ? (
-            <Card><T color={theme.danger} center>{quoteErr}</T><View style={{ height: 10 }} /><Button small variant="secondary" title="إعادة المحاولة" icon="refresh" onPress={() => fetchQuote(appliedCoupon)} /></Card>
+            <Card><T color={theme.danger} center>{quoteErr}</T><View style={{ height: 10 }} /><Button small variant="secondary" title="إعادة المحاولة" icon="refresh" onPress={async () => { const e = await fetchQuote(appliedCoupon); if (e) setQuoteErr(e); }} /></Card>
           ) : quote ? (
             <>
               <Card>
@@ -270,11 +282,10 @@ export default function NewOrder() {
               <Card>
                 <T bold style={{ marginBottom: 8 }}>كود خصم</T>
                 <Row>
-                  <View style={{ flex: 1 }}><Input value={coupon} onChangeText={setCoupon} autoCapitalize="characters" placeholder="اكتب الكود" maxLength={40} /></View>
+                  <View style={{ flex: 1 }}><Input value={coupon} onChangeText={setCoupon} autoCapitalize="characters" placeholder="اكتب الكود" maxLength={40} error={couponErr} /></View>
                   <Button small title={appliedCoupon ? 'تغيير' : 'تطبيق'} onPress={applyCoupon} loading={busy} style={{ marginBottom: 12 }} />
                 </Row>
-                {quoteErr ? <T size={13} color={theme.danger}>{quoteErr}</T> : null}
-                {appliedCoupon ? <Pressable onPress={() => { setCoupon(''); fetchQuote(undefined); }}><T size={13} color={theme.primary}>إزالة الكود</T></Pressable> : null}
+                {appliedCoupon ? <Pressable onPress={removeCoupon}><T size={13} color={theme.primary}>{`إزالة الكود ${appliedCoupon}`}</T></Pressable> : null}
               </Card>
               <Card>
                 <T bold style={{ marginBottom: 8 }}>طريقة الدفع</T>
