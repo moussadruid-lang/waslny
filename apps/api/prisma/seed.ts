@@ -1,27 +1,35 @@
 /**
  * Seeds REFERENCE data only (roles, permissions, catalog, starter pricing, geography).
  * No fake drivers/orders/payments. Geo coordinates are approximate: verify in Admin › Areas before launch.
+ *
+ * Role permissions are only (re)assigned for roles that have none yet, so changes made from the dashboard
+ * survive re-seeding. Set SEED_RESET_ROLE_PERMS=1 to force the defaults back.
  */
 import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 const egp = (n: number) => Math.round(n * 100);
 
-const PERMS = ['orders.read_all', 'orders.cancel', 'orders.reassign', 'ops.live', 'drivers.read', 'drivers.manage', 'customers.read', 'customers.manage', 'roles.manage',
-  'geo.read', 'geo.write', 'pricing.read', 'pricing.write', 'coupons.read', 'coupons.write', 'finance.read', 'finance.commission', 'finance.settle', 'finance.adjust',
-  'settings.read', 'settings.write', 'support.read', 'support.write', 'reports.read', 'audit.read'];
-const ROLES: Record<string, { nameAr: string; perms: string[] }> = {
+export const PERMS = ['orders.read_all', 'orders.cancel', 'orders.reassign', 'orders.chat_read', 'ops.live', 'drivers.read', 'drivers.manage', 'customers.read', 'customers.manage',
+  'businesses.read', 'businesses.manage', 'apikeys.manage', 'roles.manage', 'geo.read', 'geo.write', 'pricing.read', 'pricing.write', 'coupons.read', 'coupons.write',
+  'finance.read', 'finance.commission', 'finance.settle', 'finance.adjust', 'settings.read', 'settings.write', 'support.read', 'support.write', 'reports.read',
+  'audit.read', 'notifications.send', 'system.read'];
+export const ROLES: Record<string, { nameAr: string; perms: string[] }> = {
   SUPER_ADMIN: { nameAr: 'مدير عام', perms: PERMS },
   ADMIN: { nameAr: 'مدير', perms: PERMS.filter((p) => p !== 'roles.manage') },
-  OPERATIONS: { nameAr: 'تشغيل', perms: ['orders.read_all', 'orders.cancel', 'orders.reassign', 'ops.live', 'drivers.read', 'customers.read', 'geo.read', 'support.read', 'support.write', 'reports.read'] },
-  FINANCE: { nameAr: 'مالية', perms: ['orders.read_all', 'finance.read', 'finance.commission', 'finance.settle', 'finance.adjust', 'reports.read', 'pricing.read', 'audit.read'] },
-  SUPPORT: { nameAr: 'دعم فني', perms: ['orders.read_all', 'customers.read', 'drivers.read', 'support.read', 'support.write'] },
+  OPERATIONS: { nameAr: 'تشغيل', perms: ['orders.read_all', 'orders.cancel', 'orders.reassign', 'ops.live', 'drivers.read', 'drivers.manage', 'customers.read', 'businesses.read', 'geo.read', 'pricing.read', 'coupons.read', 'support.read', 'support.write', 'reports.read', 'notifications.send'] },
+  FINANCE: { nameAr: 'مالية', perms: ['orders.read_all', 'drivers.read', 'customers.read', 'businesses.read', 'finance.read', 'finance.commission', 'finance.settle', 'finance.adjust', 'reports.read', 'pricing.read', 'audit.read'] },
+  SUPPORT: { nameAr: 'دعم فني', perms: ['orders.read_all', 'orders.chat_read', 'customers.read', 'drivers.read', 'businesses.read', 'support.read', 'support.write'] },
   DRIVER: { nameAr: 'مندوب', perms: [] }, CUSTOMER: { nameAr: 'عميل', perms: [] }, BUSINESS: { nameAr: 'شركة/تاجر', perms: [] },
 };
 
 async function main() {
   for (const code of PERMS) await prisma.permission.upsert({ where: { code }, update: {}, create: { code } });
+  const reset = process.env.SEED_RESET_ROLE_PERMS === '1';
   for (const [code, r] of Object.entries(ROLES)) {
     const role = await prisma.role.upsert({ where: { code }, update: { nameAr: r.nameAr }, create: { code, nameAr: r.nameAr } });
+    const has = await prisma.rolePermission.count({ where: { roleId: role.id } });
+    // SUPER_ADMIN always gets every permission (new permissions included); others only when empty or reset requested.
+    if (code !== 'SUPER_ADMIN' && has && !reset) continue;
     const perms = await prisma.permission.findMany({ where: { code: { in: r.perms } } });
     await prisma.rolePermission.deleteMany({ where: { roleId: role.id } });
     await prisma.rolePermission.createMany({ data: perms.map((p) => ({ roleId: role.id, permissionId: p.id })) });

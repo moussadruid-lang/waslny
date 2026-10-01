@@ -1,0 +1,2 @@
+'use client';
+export default function Map({markers=[]}:{markers?:{x:number;y:number;color:'g'|'b'|'o'|'r'}[]}){return <div className="map">{markers.map((m,i)=><span key={i} className={`marker ${m.color}`} style={{left:`${m.x}%`,top:`${m.y}%`}}/>)}<div className="legend"><span><i className="marker g"/>متاح</span><span><i className="marker b"/>نشط</span><span><i className="marker o"/>بحث</span><span><i className="marker r"/>مشكلة</span></div></div>}

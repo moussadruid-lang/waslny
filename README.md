@@ -7,43 +7,30 @@
 
 | الجزء | الحالة |
 |---|---|
-| محرك الدومين (تسعير، حالات الطلب، توزيع، عمولة، تحسين مسار) | ✅ + 16 اختبار ناجح |
-| قاعدة البيانات (PostgreSQL / Prisma) — 45+ كيان | ✅ |
-| Auth بالـ OTP + Refresh rotation + RBAC (8 أدوار) | ✅ |
-| دورة الطلب الكاملة + Timeline + Optimistic locking + قبول ذري | ✅ + اختبار تزامن |
-| توزيع بموجات، تتبع لحظي، إثبات تسليم، فشل/إرجاع، محافظ وعمولات، كوبونات، دعم، Admin/Business API | ✅ |
-| رفع الصور (تحقق من النوع الحقيقي، تخزين قابل للتبديل) | ✅ المرحلة 2 |
-| **تطبيق العميل** (Expo / React Native) | ✅ المرحلة 2 — راجع [`docs/MOBILE.md`](docs/MOBILE.md) |
-| **تطبيق المندوب** (GPS في الخلفية + Offline queue + إثبات تسليم بالتوقيع) | ✅ المرحلة 2 |
-| لوحة الإدارة + Live Ops + لوحة الشركات + صفحة التتبع العامة (Next.js) | ⏳ المرحلة 3 |
-| بوابات دفع مصرية (Paymob / Fawry / محافظ) + إخفاء الأرقام | ⏳ المرحلة 4 (الـ architecture جاهزة) |
+| محرك الدومين والتسعير والحالات والتوزيع والعمولة | ✅ |
+| API/Auth/RBAC/PostgreSQL/Redis/Socket.IO | ✅ |
+| تطبيق العميل والمندوب (Expo) | ✅ المرحلة 2 |
+| **Admin + Live Ops + Business + Public Tracking (Next.js)** | ✅ المرحلة 3 على `feat/phase-3-admin-ops` |
+| بوابات الدفع المصرية | ⏳ المرحلة 4 |
 
-## التشغيل محليًا
+## تشغيل المرحلة الثالثة
 ```bash
 docker compose up -d postgres redis
-cp .env.example apps/api/.env      # عدّل القيم
+cp .env.example apps/api/.env
 npm install
 cd apps/api && npx prisma db push && npm run db:seed && cd ../..
-npm run dev        # API على :4000
-npm run worker     # الـ background jobs (توزيع، إشعارات، SMS، webhooks، bulk)
-
-# التطبيقات (dev build على أندرويد)
-npx expo install --fix --cwd apps/mobile-customer && npx expo run:android --cwd apps/mobile-customer
-npx expo install --fix --cwd apps/mobile-driver   && npx expo run:android --cwd apps/mobile-driver
+npm run dev
+npm run worker
+npm run dashboard
 ```
+
+راجع [`docs/DASHBOARD.md`](docs/DASHBOARD.md) لتفاصيل BFF والتشغيل. قبل الإنتاج: ولّد baseline migration بدل الاعتماد على `prisma db push`، واضبط CORS والـ secrets وخرائط الإنتاج.
 
 ## الاختبارات
 ```bash
-npm run test:domain                         # منطق التسعير/الحالات/التوزيع — بدون DB
-docker compose up -d postgres_test redis
+npm run test:domain
 DATABASE_URL=postgresql://mashawir:mashawir@localhost:5433/mashawir_test npm test -w @mashawir/api
-npm run typecheck:mobile                    # TypeScript للتطبيقين
+npm run typecheck:dashboard
 ```
-اختبار السيناريو الكامل `apps/api/test/e2e.lifecycle.test.ts`: عميل من **دمرو** يرسل طرد إلى **سيدي سالم** → تسعير → طلب → توزيع → قبول متزامن (واحد بس يكسب) → تتبع → استلام → OTP → دفع → عمولة → محفظة → تقييم → Admin → تقارير.
-قائمة اختبار الأجهزة (Safe Area / RTL / Offline / GPS في الخلفية) في [`docs/MOBILE.md`](docs/MOBILE.md).
 
-لتفعيل CI على GitHub: انقل `docs/ci.yml` إلى `.github/workflows/ci.yml`.
-
-> ⚠️ إحداثيات دمرو/سيدي سالم/الحدادي في الـ seed **تقريبية** — راجعها من لوحة الإدارة قبل الإطلاق.
-
-انظر [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) للتفاصيل والخطة الكاملة.
+**مهم:** لم تُشغّل npm install أو tsc أو lint أو build أو اختبارات E2E في بيئة التنفيذ الحالية، فلا يوجد ادعاء بأنها نجحت.

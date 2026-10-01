@@ -1,30 +1,11 @@
 import type { ErrorRequestHandler } from 'express';
 import { ZodError } from 'zod';
+import { Prisma } from '@prisma/client';
 import { InvalidTransitionError, NoPricingRuleError } from '@mashawir/domain';
 import { logger } from './logger.ts';
 
 /** AppError carries a stable code + a safe Arabic message. Internals never reach the client. */
-export class AppError extends Error {
-  status: number; code: string; messageAr: string;
-  constructor(status: number, code: string, messageAr: string) {
-    super(code); this.status = status; this.code = code; this.messageAr = messageAr;
-  }
-}
-export const E = {
-  unauthorized: () => new AppError(401, 'UNAUTHORIZED', 'يرجى تسجيل الدخول'),
-  forbidden: () => new AppError(403, 'FORBIDDEN', 'ليس لديك صلاحية لتنفيذ هذا الإجراء'),
-  notFound: (what = 'العنصر') => new AppError(404, 'NOT_FOUND', `${what} غير موجود`),
-  conflict: (code: string, msg: string) => new AppError(409, code, msg),
-  bad: (code: string, msg: string) => new AppError(400, code, msg),
-};
-
-export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
-  if (err instanceof AppError) return res.status(err.status).json({ error: { code: err.code, message: err.messageAr } });
-  if (err instanceof ZodError) return res.status(422).json({ error: { code: 'VALIDATION', message: 'تحقق من البيانات المدخلة', fields: err.flatten().fieldErrors } });
-  if (err instanceof InvalidTransitionError) return res.status(409).json({ error: { code: 'INVALID_TRANSITION', message: 'لا يمكن تنفيذ هذا الإجراء في حالة الطلب الحالية' } });
-  if (err instanceof NoPricingRuleError) return res.status(422).json({ error: { code: 'AREA_NOT_SERVED', message: 'الخدمة غير متاحة في هذه المنطقة حاليًا' } });
-  logger.error({ err, path: req.path }, 'unhandled');
-  res.status(500).json({ error: { code: 'INTERNAL', message: 'تعذر تنفيذ العملية، حاول مرة أخرى' } });
-};
-
+export class AppError extends Error { status: number; code: string; messageAr: string; constructor(status: number, code: string, messageAr: string) { super(code); this.status = status; this.code = code; this.messageAr = messageAr; } }
+export const E = { unauthorized: () => new AppError(401, 'UNAUTHORIZED', 'يرجى تسجيل الدخول'), forbidden: () => new AppError(403, 'FORBIDDEN', 'ليس لديك صلاحية لتنفيذ هذا الإجراء'), notFound: (what = 'العنصر') => new AppError(404, 'NOT_FOUND', `${what} غير موجود`), conflict: (code: string, msg: string) => new AppError(409, code, msg), bad: (code: string, msg: string) => new AppError(400, code, msg) };
+export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => { if (err instanceof AppError) return res.status(err.status).json({ error: { code: err.code, message: err.messageAr } }); if (err instanceof ZodError) return res.status(422).json({ error: { code: 'VALIDATION', message: 'تحقق من البيانات المدخلة', fields: err.flatten().fieldErrors, form: err.flatten().formErrors } }); if (err instanceof InvalidTransitionError) return res.status(409).json({ error: { code: 'INVALID_TRANSITION', message: 'لا يمكن تنفيذ هذا الإجراء في حالة الطلب الحالية' } }); if (err instanceof NoPricingRuleError) return res.status(422).json({ error: { code: 'AREA_NOT_SERVED', message: 'الخدمة غير متاحة في هذه المنطقة حاليًا' } }); if (err instanceof Prisma.PrismaClientKnownRequestError) { if (err.code === 'P2025') return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'العنصر غير موجود' } }); if (err.code === 'P2002') return res.status(409).json({ error: { code: 'DUPLICATE', message: 'العنصر موجود بالفعل' } }); } if (err?.type === 'entity.too.large') return res.status(413).json({ error: { code: 'TOO_LARGE', message: 'حجم البيانات أكبر من المسموح' } }); if (err?.type === 'entity.parse.failed') return res.status(400).json({ error: { code: 'BAD_JSON', message: 'صيغة البيانات غير صحيحة' } }); logger.error({ err, path: req.path }, 'unhandled'); res.status(500).json({ error: { code: 'INTERNAL', message: 'تعذر تنفيذ العملية، حاول مرة أخرى' } }); };
 export const ah = <T extends (...a: any[]) => Promise<any>>(fn: T) => (req: any, res: any, next: any) => fn(req, res, next).catch(next);

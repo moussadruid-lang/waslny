@@ -1,69 +1,16 @@
-import { Router } from 'express';
+import { Router, type Response } from 'express';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/db.ts';
 import { ah } from '../lib/errors.ts';
 import { requirePerm } from '../middleware/auth.ts';
+import { orderFilters, orderWhereSql, num } from '../lib/sql.ts';
+import { getSetting } from './settings.ts';
 
-export const reportsRouter = Router();
-const range = (q: any) => ({ from: q.from ? new Date(q.from) : new Date(Date.now() - 30 * 86400_000), to: q.to ? new Date(q.to) : new Date() });
-const num = (r: any) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, typeof v === 'bigint' ? Number(v) : v]));
-
-reportsRouter.get('/overview', requirePerm('reports.read'), ah(async (req, res) => {
-  const { from, to } = range(req.query);
-  const [byStatus, money, comm, timings, peakHours, topAreas] = await Promise.all([
-    prisma.order.groupBy({ by: ['status'], where: { createdAt: { gte: from, lte: to } }, _count: true }),
-    prisma.order.aggregate({ where: { status: 'DELIVERED', deliveredAt: { gte: from, lte: to } }, _sum: { total: true, discount: true }, _avg: { total: true } }),
-    prisma.commission.aggregate({ where: { createdAt: { gte: from, lte: to } }, _sum: { commission: true, driverEarning: true } }),
-    prisma.$queryRaw<{ avg_accept_min: number; avg_delivery_min: number }[]>`
-      SELECT AVG(EXTRACT(EPOCH FROM (a.at - o."createdAt"))/60)::float AS avg_accept_min,
-             AVG(EXTRACT(EPOCH FROM (o."deliveredAt" - o."createdAt"))/60)::float AS avg_delivery_min
-      FROM "Order" o LEFT JOIN "OrderStatusHistory" a ON a."orderId" = o.id AND a."toStatus" = 'DRIVER_ASSIGNED'
-      WHERE o."createdAt" BETWEEN ${from} AND ${to}`,
-    prisma.$queryRaw<{ hour: number; orders: bigint }[]>`
-      SELECT EXTRACT(HOUR FROM ("createdAt" AT TIME ZONE 'Africa/Cairo'))::int AS hour, COUNT(*) AS orders
-      FROM "Order" WHERE "createdAt" BETWEEN ${from} AND ${to} GROUP BY 1 ORDER BY 1`,
-    prisma.$queryRaw<{ geo: string; name: string; orders: bigint; avg_price: number }[]>`
-      SELECT s."geoUnitId" AS geo, g."nameAr" AS name, COUNT(*) AS orders, AVG(o.total)::float AS avg_price
-      FROM "OrderStop" s JOIN "Order" o ON o.id = s."orderId" LEFT JOIN "GeoUnit" g ON g.id = s."geoUnitId"
-      WHERE s.seq = 0 AND o."createdAt" BETWEEN ${from} AND ${to} GROUP BY 1,2 ORDER BY 3 DESC LIMIT 20`,
-  ]);
-  const count = (s: string) => byStatus.find((b) => b.status === s)?._count ?? 0;
-  const total = byStatus.reduce((s, b) => s + b._count, 0);
-  const pct = (n: number) => (total ? Math.round((n / total) * 1000) / 10 : 0);
-  res.json({
-    totalOrders: total, delivered: count('DELIVERED'), cancelled: count('CANCELLED'), failed: count('FAILED_DELIVERY'), returned: count('RETURNED'),
-    deliveryRate: pct(count('DELIVERED')), cancelRate: pct(count('CANCELLED')), returnRate: pct(count('RETURNED')),
-    revenue: money._sum.total ?? 0, discounts: money._sum.discount ?? 0, avgOrderValue: Math.round(money._avg.total ?? 0),
-    commission: comm._sum.commission ?? 0, driverEarnings: comm._sum.driverEarning ?? 0,
-    platformNet: (comm._sum.commission ?? 0) - (money._sum.discount ?? 0),
-    avgAcceptMinutes: timings[0]?.avg_accept_min ?? null, avgDeliveryMinutes: timings[0]?.avg_delivery_min ?? null,
-    peakHours: peakHours.map(num), topAreas: topAreas.map(num),
-  });
-}));
-
-reportsRouter.get('/drivers', requirePerm('reports.read'), ah(async (req, res) => {
-  const { from, to } = range(req.query);
-  const rows = await prisma.$queryRaw<any[]>`
-    SELECT d.id, u.name, d.rating,
-      COUNT(o.id) FILTER (WHERE o.status='DELIVERED') AS delivered,
-      COUNT(o.id) FILTER (WHERE o.status='CANCELLED') AS cancelled,
-      COUNT(o.id) FILTER (WHERE o.status IN ('FAILED_DELIVERY','RETURNED','RETURNING')) AS failed,
-      COALESCE(SUM(c."driverEarning"),0)::int AS earnings, COALESCE(SUM(c.commission),0)::int AS commission,
-      AVG(EXTRACT(EPOCH FROM (o."deliveredAt"-o."createdAt"))/60)::float AS avg_delivery_min
-    FROM "Driver" d JOIN "User" u ON u.id=d."userId"
-    LEFT JOIN "Order" o ON o."driverId"=d.id AND o."createdAt" BETWEEN ${from} AND ${to}
-    LEFT JOIN "Commission" c ON c."orderId"=o.id
-    GROUP BY d.id, u.name, d.rating ORDER BY delivered DESC LIMIT 200`;
-  res.json(rows.map(num));
-}));
-
-reportsRouter.get('/areas', requirePerm('reports.read'), ah(async (req, res) => {
-  const { from, to } = range(req.query);
-  const rows = await prisma.$queryRaw<any[]>`
-    SELECT g.id, g."nameAr" AS name, g.level, COUNT(o.id) AS orders, AVG(o.total)::float AS avg_price,
-      (SELECT COUNT(*) FROM "Driver" d WHERE g.id = ANY(d."serviceAreaIds")) AS drivers,
-      MODE() WITHIN GROUP (ORDER BY EXTRACT(HOUR FROM (o."createdAt" AT TIME ZONE 'Africa/Cairo'))) AS peak_hour
-    FROM "GeoUnit" g LEFT JOIN "OrderStop" s ON s."geoUnitId"=g.id AND s.seq=0
-    LEFT JOIN "Order" o ON o.id=s."orderId" AND o."createdAt" BETWEEN ${from} AND ${to}
-    GROUP BY g.id ORDER BY orders DESC`;
-  res.json(rows.map(num));
-}));
+/** Reports: every number is aggregated in Postgres with the same filters (from, to, geoUnitId, businessId, driverId). ?format=csv for export. */
+export const reportsRouter = Router(); reportsRouter.use(requirePerm('reports.read'));
+function send(res: Response, req: any, name: string, rows: Record<string, unknown>[], extra?: object) { if (req.query.format !== 'csv') return res.json(extra ? { ...extra, rows } : rows); const cols = [...new Set(rows.flatMap((r) => Object.keys(r)))]; const esc = (v: unknown) => { const s = v == null ? '' : v instanceof Date ? v.toISOString() : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; }; res.setHeader('content-type', 'text/csv; charset=utf-8'); res.setHeader('content-disposition', `attachment; filename="${name}.csv"`); res.send('\uFEFF' + [cols.join(','), ...rows.map((r) => cols.map((c) => esc(r[c])).join(','))].join('\n')); }
+reportsRouter.get('/overview', ah(async (req, res) => { const f = orderFilters(req.query); const w = orderWhereSql(f); const [k] = await prisma.$queryRaw<any[]>`SELECT COUNT(*) AS total_orders, COUNT(*) FILTER (WHERE o.status='DELIVERED') AS delivered, COUNT(*) FILTER (WHERE o.status='CANCELLED') AS cancelled, COUNT(*) FILTER (WHERE o.status='FAILED_DELIVERY') AS failed, COUNT(*) FILTER (WHERE o.status IN ('RETURNING','RETURNED')) AS returned, COALESCE(SUM(o.total) FILTER (WHERE o.status='DELIVERED'),0)::bigint AS revenue, COALESCE(SUM(o.discount) FILTER (WHERE o.status='DELIVERED'),0)::bigint AS discounts, COALESCE(AVG(o.total) FILTER (WHERE o.status='DELIVERED'),0)::int AS avg_order_value FROM "Order" o WHERE ${w}`; const [c] = await prisma.$queryRaw<any[]>`SELECT COALESCE(SUM(c.commission),0)::bigint AS commission, COALESCE(SUM(c."driverEarning"),0)::bigint AS driver_earnings FROM "Commission" c JOIN "Order" o ON o.id=c."orderId" WHERE ${w}`; const peak = await prisma.$queryRaw<any[]>`SELECT EXTRACT(HOUR FROM (o."createdAt" AT TIME ZONE 'Africa/Cairo'))::int AS hour, COUNT(*) AS orders FROM "Order" o WHERE ${w} GROUP BY 1 ORDER BY 1`; const kk = num(k) as any; const t = kk.total_orders || 0; const pct = (n: number) => (t ? Math.round((n / t) * 1000) / 10 : 0); res.json({ ...kk, ...num(c), delivery_rate: pct(kk.delivered), cancel_rate: pct(kk.cancelled), return_rate: pct(kk.returned), platform_net: Number(c.commission) - Number(kk.discounts), peakHours: peak.map(num) }); }));
+reportsRouter.get('/operations', ah(async (req, res) => { const f = orderFilters(req.query); const w = orderWhereSql(f); const { deliveryLateMinutes } = await getSetting('ops'); const [t] = await prisma.$queryRaw<any[]>`WITH h AS (SELECT o.id, o."createdAt", o."deliveredAt", o.status, MIN(x.at) FILTER (WHERE x."toStatus"='DRIVER_ASSIGNED') AS assigned_at, MIN(x.at) FILTER (WHERE x."toStatus"='PACKAGE_PICKED_UP') AS picked_at FROM "Order" o LEFT JOIN "OrderStatusHistory" x ON x."orderId"=o.id WHERE ${w} GROUP BY o.id) SELECT COUNT(*) AS orders, AVG(EXTRACT(EPOCH FROM (assigned_at-"createdAt"))/60)::float AS avg_assign_min, AVG(EXTRACT(EPOCH FROM (picked_at-assigned_at))/60)::float AS avg_pickup_min, AVG(EXTRACT(EPOCH FROM ("deliveredAt"-picked_at))/60)::float AS avg_last_mile_min, AVG(EXTRACT(EPOCH FROM ("deliveredAt"-"createdAt"))/60)::float AS avg_total_min, COUNT(*) FILTER (WHERE status='DELIVERED' AND "deliveredAt"-"createdAt" > make_interval(mins => ${deliveryLateMinutes})) AS late_deliveries, COUNT(*) FILTER (WHERE assigned_at IS NULL AND status='CANCELLED') AS cancelled_before_assign FROM h`; const byStatus = await prisma.$queryRaw<any[]>`SELECT o.status::text AS status, COUNT(*) AS n FROM "Order" o WHERE ${w} GROUP BY 1 ORDER BY 2 DESC`; const cancelReasons = await prisma.$queryRaw<any[]>`SELECT COALESCE(o."cancelReason",'—') AS reason, COUNT(*) AS n FROM "Order" o WHERE ${w} AND o.status='CANCELLED' GROUP BY 1 ORDER BY 2 DESC LIMIT 20`; const failReasons = await prisma.$queryRaw<any[]>`SELECT o."failReason" AS code, r."nameAr" AS reason, COUNT(*) AS n FROM "Order" o LEFT JOIN "FailureReason" r ON r.code=o."failReason" WHERE ${w} AND o."failReason" IS NOT NULL GROUP BY 1,2 ORDER BY 3 DESC`; const daily = await prisma.$queryRaw<any[]>`SELECT to_char(date_trunc('day', o."createdAt" AT TIME ZONE 'Africa/Cairo'),'YYYY-MM-DD') AS day, COUNT(*) AS orders, COUNT(*) FILTER (WHERE o.status='DELIVERED') AS delivered, COUNT(*) FILTER (WHERE o.status='CANCELLED') AS cancelled FROM "Order" o WHERE ${w} GROUP BY 1 ORDER BY 1`; if (req.query.format === 'csv') return send(res, req, 'operations-daily', daily.map(num)); res.json({ timings: num(t), byStatus: byStatus.map(num), cancelReasons: cancelReasons.map(num), failReasons: failReasons.map(num), daily: daily.map(num) }); }));
+reportsRouter.get('/drivers', ah(async (req, res) => { const f = orderFilters(req.query); const geo = f.geoUnitId ? Prisma.sql`AND ${f.geoUnitId} = ANY(d."serviceAreaIds")` : Prisma.empty; const rows = await prisma.$queryRaw<any[]>`WITH off AS (SELECT "driverId", COUNT(*) AS offers, COUNT(*) FILTER (WHERE status='ACCEPTED') AS accepted, COUNT(*) FILTER (WHERE status='REJECTED') AS rejected, COUNT(*) FILTER (WHERE status='EXPIRED') AS expired FROM "DispatchOffer" WHERE "createdAt" BETWEEN ${f.from} AND ${f.to} GROUP BY 1), ord AS (SELECT o."driverId", COUNT(*) AS assigned, COUNT(*) FILTER (WHERE o.status='DELIVERED') AS delivered, COUNT(*) FILTER (WHERE o.status='CANCELLED') AS cancelled, COUNT(*) FILTER (WHERE o.status IN ('FAILED_DELIVERY','RETURNING','RETURNED')) AS failed, AVG(EXTRACT(EPOCH FROM (o."deliveredAt"-o."createdAt"))/60) FILTER (WHERE o.status='DELIVERED') AS avg_delivery_min FROM "Order" o WHERE o."driverId" IS NOT NULL AND ${orderWhereSql({ ...f, driverId: undefined })} GROUP BY 1), com AS (SELECT c."driverId", SUM(c."driverEarning") AS earnings, SUM(c.commission) AS commission FROM "Commission" c WHERE c."createdAt" BETWEEN ${f.from} AND ${f.to} GROUP BY 1) SELECT d.id, u.name, u.phone, d.status::text AS status, d.rating, d."ratingCount" AS rating_count, COALESCE(off.offers,0) AS offers, COALESCE(off.accepted,0) AS accepted, COALESCE(off.rejected,0) AS rejected, COALESCE(off.expired,0) AS expired, CASE WHEN COALESCE(off.offers,0) > 0 THEN ROUND(100.0 * off.accepted / off.offers, 1) END::float AS acceptance_rate, COALESCE(ord.assigned,0) AS assigned, COALESCE(ord.delivered,0) AS delivered, COALESCE(ord.cancelled,0) AS cancelled, COALESCE(ord.failed,0) AS failed, CASE WHEN COALESCE(ord.assigned,0) > 0 THEN ROUND(100.0 * ord.delivered / ord.assigned, 1) END::float AS completion_rate, ord.avg_delivery_min::float AS avg_delivery_min, COALESCE(com.earnings,0)::bigint AS earnings, COALESCE(com.commission,0)::bigint AS commission FROM "Driver" d JOIN "User" u ON u.id=d."userId" LEFT JOIN off ON off."driverId"=d.id LEFT JOIN ord ON ord."driverId"=d.id LEFT JOIN com ON com."driverId"=d.id WHERE (off.offers IS NOT NULL OR ord.assigned IS NOT NULL) ${f.driverId ? Prisma.sql`AND d.id = ${f.driverId}` : Prisma.empty} ${geo} ORDER BY delivered DESC NULLS LAST LIMIT 500`; send(res, req, 'drivers', rows.map(num)); }));
+reportsRouter.get('/areas', ah(async (req, res) => { const f = orderFilters(req.query); const level = typeof req.query.level === 'string' ? req.query.level : null; const w = orderWhereSql({ ...f, geoUnitId: undefined }); const rows = await prisma.$queryRaw<any[]>`WITH demand AS (SELECT s."geoUnitId" AS gid, COUNT(DISTINCT o.id) AS orders, COUNT(DISTINCT o.id) FILTER (WHERE o.status='DELIVERED') AS delivered, COUNT(DISTINCT o.id) FILTER (WHERE o.status='CANCELLED') AS cancelled, COALESCE(SUM(o.total) FILTER (WHERE o.status='DELIVERED'),0) AS revenue, AVG(o.total) AS avg_price, MODE() WITHIN GROUP (ORDER BY EXTRACT(HOUR FROM (o."createdAt" AT TIME ZONE 'Africa/Cairo'))) AS peak_hour FROM "OrderStop" s JOIN "Order" o ON o.id=s."orderId" WHERE s.seq=0 AND ${w} GROUP BY 1), supply AS (SELECT a AS gid, COUNT(*) AS drivers, COUNT(*) FILTER (WHERE d.online) AS online FROM "Driver" d, unnest(d."serviceAreaIds") a WHERE d.status='APPROVED' GROUP BY 1) SELECT g.id, g."nameAr" AS name, g.level::text AS level, g.active, p."nameAr" AS parent, COALESCE(demand.orders,0) AS orders, COALESCE(demand.delivered,0) AS delivered, COALESCE(demand.cancelled,0) AS cancelled, COALESCE(demand.revenue,0)::bigint AS revenue, demand.avg_price::int AS avg_price, demand.peak_hour::int AS peak_hour, COALESCE(supply.drivers,0) AS drivers, COALESCE(supply.online,0) AS online_drivers, CASE WHEN COALESCE(supply.drivers,0) > 0 THEN ROUND(COALESCE(demand.orders,0)::numeric / supply.drivers, 1) END::float AS orders_per_driver FROM "GeoUnit" g LEFT JOIN "GeoUnit" p ON p.id=g."parentId" LEFT JOIN demand ON demand.gid=g.id LEFT JOIN supply ON supply.gid=g.id WHERE (demand.orders IS NOT NULL OR supply.drivers IS NOT NULL OR g.active) ${level ? Prisma.sql`AND g.level::text = ${level}` : Prisma.empty} ${f.geoUnitId ? Prisma.sql`AND (g.id = ${f.geoUnitId} OR g."parentId" = ${f.geoUnitId})` : Prisma.empty} ORDER BY orders DESC, g."nameAr" LIMIT 500`; send(res, req, 'areas', rows.map(num)); }));
+reportsRouter.get('/finance', requirePerm('finance.read'), ah(async (req, res) => { const f = orderFilters(req.query); const w = orderWhereSql(f, 'deliveredAt'); const daily = await prisma.$queryRaw<any[]>`SELECT to_char(date_trunc('day', o."deliveredAt" AT TIME ZONE 'Africa/Cairo'),'YYYY-MM-DD') AS day, COUNT(*) AS delivered, COALESCE(SUM(o.total),0)::bigint AS fees, COALESCE(SUM(o.discount),0)::bigint AS discounts, COALESCE(SUM(o."codAmount"),0)::bigint AS cod, COALESCE(SUM(c.commission),0)::bigint AS commission, COALESCE(SUM(c."driverEarning"),0)::bigint AS driver_earnings, COUNT(*) FILTER (WHERE o."paymentMethod"='CASH') AS cash_orders, COUNT(*) FILTER (WHERE o."paymentMethod"='WALLET') AS wallet_orders FROM "Order" o LEFT JOIN "Commission" c ON c."orderId"=o.id WHERE o.status='DELIVERED' AND ${w} GROUP BY 1 ORDER BY 1`; const [refunds] = await prisma.$queryRaw<any[]>`SELECT COALESCE(SUM(t.amount),0)::bigint AS refunds, COUNT(*) AS n FROM "WalletTransaction" t JOIN "Wallet" wl ON wl.id=t."walletId" WHERE wl."ownerType"='CUSTOMER' AND t.type IN ('REFUND','MANUAL_REFUND') AND t."createdAt" BETWEEN ${f.from} AND ${f.to}`; const [stl] = await prisma.$queryRaw<any[]>`SELECT COALESCE(SUM(amount),0)::bigint AS settled, COUNT(*) AS n FROM "Settlement" WHERE "createdAt" BETWEEN ${f.from} AND ${f.to}`; const rows = daily.map(num) as any[]; const totals = rows.reduce((a, r) => { for (const k of Object.keys(r)) if (k !== 'day') a[k] = (a[k] ?? 0) + Number(r[k] ?? 0); return a; }, {} as Record<string, number>); send(res, req, 'finance', rows, { totals: { ...totals, net: (totals.commission ?? 0) - (totals.discounts ?? 0) }, refunds: num(refunds), settlements: num(stl) }); }));

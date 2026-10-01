@@ -6,124 +6,31 @@ import { ah, E } from '../lib/errors.ts';
 import { acceptOffer, transition, completeDelivery, failDelivery, completeReturn, releaseDriver } from './orders.service.ts';
 import { rejectOffer } from './dispatch.service.ts';
 import { emit } from './realtime.ts';
+import { PUBLIC_DRIVER_STATUSES } from './tracking.ts';
 
 export const driverRouter = Router();
 const me = (req: any) => req.user!.driverId as string;
 
 driverRouter.put('/profile', ah(async (req, res) => {
-  const b = z.object({ nationalIdNo: z.string().regex(/^\d{14}$/, 'الرقم القومي 14 رقم'), vehicleTypeCode: z.string(), model: z.string().max(60), plate: z.string().max(20), color: z.string().max(30).optional(),
-    documents: z.array(z.object({ type: z.enum(['NATIONAL_ID_FRONT', 'NATIONAL_ID_BACK', 'LICENSE', 'VEHICLE_LICENSE', 'CRIMINAL_RECORD', 'PHOTO']), fileUrl: z.string().url() })).min(3) }).parse(req.body);
-  const vt = await prisma.vehicleType.findUnique({ where: { code: b.vehicleTypeCode } });
-  if (!vt?.active) throw E.bad('BAD_VEHICLE', 'نوع المركبة غير متاح');
-  await prisma.$transaction(async (tx) => {
-    await tx.driver.update({ where: { id: me(req) }, data: { nationalIdNo: b.nationalIdNo, status: 'PENDING' } });
-    await tx.vehicle.deleteMany({ where: { driverId: me(req) } });
-    await tx.vehicle.create({ data: { driverId: me(req), vehicleTypeId: vt.id, model: b.model, plate: b.plate, color: b.color } });
-    await tx.driverDocument.createMany({ data: b.documents.map((d) => ({ ...d, driverId: me(req) })) });
-  });
-  res.json({ ok: true, messageAr: 'تم إرسال بياناتك للمراجعة' });
+  const b = z.object({ nationalIdNo: z.string().regex(/^\d{14}$/, 'الرقم القومي 14 رقم'), vehicleTypeCode: z.string(), model: z.string().max(60), plate: z.string().max(20), color: z.string().max(30).optional(), documents: z.array(z.object({ type: z.enum(['NATIONAL_ID_FRONT', 'NATIONAL_ID_BACK', 'LICENSE', 'VEHICLE_LICENSE', 'CRIMINAL_RECORD', 'PHOTO']), fileUrl: z.string().url() })).min(3) }).parse(req.body);
+  const vt = await prisma.vehicleType.findUnique({ where: { code: b.vehicleTypeCode } }); if (!vt?.active) throw E.bad('BAD_VEHICLE', 'نوع المركبة غير متاح');
+  await prisma.$transaction(async (tx) => { await tx.driver.update({ where: { id: me(req) }, data: { nationalIdNo: b.nationalIdNo, status: 'PENDING' } }); await tx.vehicle.deleteMany({ where: { driverId: me(req) } }); await tx.vehicle.create({ data: { driverId: me(req), vehicleTypeId: vt.id, model: b.model, plate: b.plate, color: b.color } }); await tx.driverDocument.createMany({ data: b.documents.map((d) => ({ ...d, driverId: me(req) })) }); });
+  emit('ops', 'driver:pending', { driverId: me(req) }); res.json({ ok: true, messageAr: 'تم إرسال بياناتك للمراجعة' });
 }));
 
-driverRouter.post('/online', ah(async (req, res) => {
-  const { online } = z.object({ online: z.boolean() }).parse(req.body);
-  const d = await prisma.driver.findUniqueOrThrow({ where: { id: me(req) } });
-  if (online && d.status !== 'APPROVED') throw E.bad('NOT_APPROVED', 'حسابك قيد المراجعة');
-  await prisma.driver.update({ where: { id: d.id }, data: { online } });
-  emit('ops', 'driver:online', { driverId: d.id, online });
-  res.json({ online });
-}));
+driverRouter.post('/online', ah(async (req, res) => { const { online } = z.object({ online: z.boolean() }).parse(req.body); const d = await prisma.driver.findUniqueOrThrow({ where: { id: me(req) } }); if (online && d.status !== 'APPROVED') throw E.bad('NOT_APPROVED', 'حسابك قيد المراجعة'); await prisma.driver.update({ where: { id: d.id }, data: { online } }); emit('ops', 'driver:online', { driverId: d.id, online, at: new Date() }); res.json({ online }); }));
+const Loc = z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180), heading: z.number().optional(), speed: z.number().optional(), accuracy: z.number().optional(), at: z.coerce.date().optional() });
+driverRouter.post('/location', ah(async (req, res) => { const points = z.union([Loc, z.array(Loc).min(1).max(200)]).parse(req.body); const list = (Array.isArray(points) ? points : [points]).sort((a, b) => +(a.at ?? 0) - +(b.at ?? 0)); const d = await prisma.driver.findUniqueOrThrow({ where: { id: me(req) } }); const active = await prisma.order.findFirst({ where: { driverId: d.id, status: { in: ['DRIVER_ASSIGNED', 'DRIVER_GOING_TO_PICKUP', 'DRIVER_ARRIVED_PICKUP', 'PACKAGE_PICKED_UP', 'IN_DELIVERY', 'DRIVER_ARRIVED_DESTINATION', 'RETURNING'] } }, include: { stops: { orderBy: { seq: 'asc' } } } }); let prev = d.lastLat != null && d.lastLocationAt ? { lat: d.lastLat, lng: d.lastLng!, at: d.lastLocationAt.getTime() } : null; for (const p of list) { const at = (p.at ?? new Date()).getTime(); const suspicious = !!prev && isImpossibleJump(prev, { ...p, at }); await prisma.driverLocation.create({ data: { driverId: d.id, orderId: active?.id, lat: p.lat, lng: p.lng, heading: p.heading, speed: p.speed, accuracy: p.accuracy, suspicious, at: new Date(at) } }); if (suspicious) await prisma.fraudSignal.create({ data: { kind: 'GPS_JUMP', userId: req.user!.id, orderId: active?.id, severity: 2, details: { prev, next: p } as any } }); prev = { ...p, at }; } const last = list.at(-1)!; const at = last.at ?? new Date(); await prisma.driver.update({ where: { id: d.id }, data: { lastLat: last.lat, lastLng: last.lng, lastLocationAt: at } }); emit('ops', 'driver:location', { driverId: d.id, lat: last.lat, lng: last.lng, busy: !!active, orderId: active?.id ?? null, at }); if (active) { const target = ['PACKAGE_PICKED_UP', 'IN_DELIVERY', 'DRIVER_ARRIVED_DESTINATION'].includes(active.status) ? active.stops.find((s) => s.type === 'DROPOFF' && !s.completedAt) : active.stops[0]; const km = target ? haversineKm(last, target) * 1.3 : 0; const payload = { lat: last.lat, lng: last.lng, heading: last.heading, distanceKm: Math.round(km * 10) / 10, etaMinutes: etaMinutes(km, 30), at }; emit(`order:${active.id}`, 'driver:location', payload); if (PUBLIC_DRIVER_STATUSES.includes(active.status)) emit(`track:${active.trackingToken}`, 'driver:location', { lat: last.lat, lng: last.lng, etaMinutes: payload.etaMinutes, at }); } res.json({ ok: true }); }));
 
-const Loc = z.object({ lat: z.number(), lng: z.number(), heading: z.number().optional(), speed: z.number().optional(), accuracy: z.number().optional(), at: z.coerce.date().optional() });
-driverRouter.post('/location', ah(async (req, res) => {
-  const points = z.union([Loc, z.array(Loc).max(200)]).parse(req.body); // batch supported for offline buffering
-  const list = (Array.isArray(points) ? points : [points]).sort((a, b) => +(a.at ?? 0) - +(b.at ?? 0));
-  const d = await prisma.driver.findUniqueOrThrow({ where: { id: me(req) } });
-  const active = await prisma.order.findFirst({ where: { driverId: d.id, status: { in: ['DRIVER_ASSIGNED', 'DRIVER_GOING_TO_PICKUP', 'DRIVER_ARRIVED_PICKUP', 'PACKAGE_PICKED_UP', 'IN_DELIVERY', 'DRIVER_ARRIVED_DESTINATION', 'RETURNING'] } }, include: { stops: { orderBy: { seq: 'asc' } } } });
-  let prev = d.lastLat != null && d.lastLocationAt ? { lat: d.lastLat, lng: d.lastLng!, at: d.lastLocationAt.getTime() } : null;
-  for (const p of list) {
-    const at = (p.at ?? new Date()).getTime();
-    const suspicious = !!prev && isImpossibleJump(prev, { ...p, at });
-    await prisma.driverLocation.create({ data: { driverId: d.id, orderId: active?.id, lat: p.lat, lng: p.lng, heading: p.heading, speed: p.speed, accuracy: p.accuracy, suspicious, at: new Date(at) } });
-    if (suspicious) await prisma.fraudSignal.create({ data: { kind: 'GPS_JUMP', userId: req.user!.id, orderId: active?.id, severity: 2, details: { prev, next: p } as any } });
-    prev = { ...p, at };
-  }
-  const last = list.at(-1)!;
-  await prisma.driver.update({ where: { id: d.id }, data: { lastLat: last.lat, lastLng: last.lng, lastLocationAt: last.at ?? new Date() } });
-  emit('ops', 'driver:location', { driverId: d.id, lat: last.lat, lng: last.lng, busy: !!active });
-  if (active) {
-    const target = ['PACKAGE_PICKED_UP', 'IN_DELIVERY', 'DRIVER_ARRIVED_DESTINATION'].includes(active.status) ? active.stops.find((s) => s.type === 'DROPOFF' && !s.completedAt) : active.stops[0];
-    const km = target ? haversineKm(last, target) * 1.3 : 0;
-    const payload = { lat: last.lat, lng: last.lng, heading: last.heading, distanceKm: Math.round(km * 10) / 10, etaMinutes: etaMinutes(km, 30) };
-    emit(`order:${active.id}`, 'driver:location', payload);
-    emit(`track:${active.trackingToken}`, 'driver:location', payload);
-  }
-  res.json({ ok: true });
-}));
-
-driverRouter.get('/offers', ah(async (req, res) => res.json(await prisma.dispatchOffer.findMany({ where: { driverId: me(req), status: 'PENDING', expiresAt: { gt: new Date() } },
-  include: { order: { select: { id: true, code: true, total: true, distanceKm: true, packageSizeCode: true, weightKg: true, urgent: true, stops: { select: { type: true, lat: true, lng: true, formatted: true, landmark: true }, orderBy: { seq: 'asc' } } } } } }))));
+driverRouter.get('/offers', ah(async (req, res) => res.json(await prisma.dispatchOffer.findMany({ where: { driverId: me(req), status: 'PENDING', expiresAt: { gt: new Date() } }, include: { order: { select: { id: true, code: true, total: true, distanceKm: true, packageSizeCode: true, weightKg: true, urgent: true, stops: { select: { type: true, lat: true, lng: true, formatted: true, landmark: true }, orderBy: { seq: 'asc' } } } } }))));
 driverRouter.post('/offers/:orderId/accept', ah(async (req, res) => { await acceptOffer(req.params.orderId, me(req)); res.json({ ok: true, messageAr: 'تم قبول الطلب' }); }));
 driverRouter.post('/offers/:orderId/reject', ah(async (req, res) => { await rejectOffer(req.params.orderId, me(req)); res.json({ ok: true }); }));
-
-driverRouter.get('/orders/active', ah(async (req, res) => {
-  const orders = await prisma.order.findMany({ where: { driverId: me(req), status: { notIn: ['DELIVERED', 'CANCELLED', 'RETURNED'] } }, include: { stops: { orderBy: { seq: 'asc' } }, customer: { select: { name: true } } } });
-  const d = await prisma.driver.findUniqueOrThrow({ where: { id: me(req) } });
-  const picked = new Set(orders.filter((o) => !['DRIVER_ASSIGNED', 'DRIVER_GOING_TO_PICKUP', 'DRIVER_ARRIVED_PICKUP'].includes(o.status)).map((o) => o.id));
-  const stops = orders.flatMap((o) => o.stops.filter((s) => !s.completedAt && !(s.type === 'PICKUP' && picked.has(o.id))).map((s) => ({ id: s.id, orderId: o.id, type: s.type === 'PICKUP' ? 'PICKUP' as const : 'DROPOFF' as const, location: { lat: s.lat, lng: s.lng } })));
-  const route = d.lastLat != null ? optimizeStops({ lat: d.lastLat, lng: d.lastLng! }, stops, picked) : stops;
-  res.json({ orders: orders.map(({ deliveryOtpHash, ...o }) => o), route: route.map((s) => s.id) });
-}));
-
-// Driver-driven progression. DELIVERED is NOT allowed here: it requires proof via /deliver.
+driverRouter.get('/orders/active', ah(async (req, res) => { const orders = await prisma.order.findMany({ where: { driverId: me(req), status: { notIn: ['DELIVERED', 'CANCELLED', 'RETURNED'] } }, include: { stops: { orderBy: { seq: 'asc' } }, customer: { select: { name: true } } } }); const d = await prisma.driver.findUniqueOrThrow({ where: { id: me(req) } }); const picked = new Set(orders.filter((o) => !['DRIVER_ASSIGNED', 'DRIVER_GOING_TO_PICKUP', 'DRIVER_ARRIVED_PICKUP'].includes(o.status)).map((o) => o.id)); const stops = orders.flatMap((o) => o.stops.filter((s) => !s.completedAt && !(s.type === 'PICKUP' && picked.has(o.id))).map((s) => ({ id: s.id, orderId: o.id, type: s.type === 'PICKUP' ? 'PICKUP' as const : 'DROPOFF' as const, location: { lat: s.lat, lng: s.lng } }))); const route = d.lastLat != null ? optimizeStops({ lat: d.lastLat, lng: d.lastLng! }, stops, picked) : stops; res.json({ orders: orders.map(({ deliveryOtpHash, ...o }) => o), route: route.map((s) => s.id) }); }));
 const STEP = z.enum(['DRIVER_GOING_TO_PICKUP', 'DRIVER_ARRIVED_PICKUP', 'PACKAGE_PICKED_UP', 'IN_DELIVERY', 'DRIVER_ARRIVED_DESTINATION']);
-driverRouter.post('/orders/:id/status', ah(async (req, res) => {
-  const b = z.object({ to: STEP, lat: z.number(), lng: z.number(), photoUrl: z.string().url().optional(), clientId: z.string().optional() }).parse(req.body);
-  const o = await prisma.order.findFirst({ where: { id: req.params.id, driverId: me(req) } });
-  if (!o) throw E.notFound('الطلب');
-  if (o.status === b.to) return res.json({ ok: true, idempotent: true }); // offline replay safety
-  await transition(o.id, b.to, { type: 'DRIVER', id: me(req), lat: b.lat, lng: b.lng });
-  if (b.to === 'PACKAGE_PICKED_UP' && b.photoUrl) await prisma.deliveryProof.create({ data: { orderId: o.id, kind: 'PICKUP', photoUrl: b.photoUrl, lat: b.lat, lng: b.lng, capturedAt: new Date(), clientId: b.clientId } });
-  res.json({ ok: true });
-}));
-
-driverRouter.post('/orders/:id/deliver', ah(async (req, res) => {
-  const b = z.object({ otp: z.string().optional(), recipientName: z.string().max(80).optional(), photoUrl: z.string().url().optional(), signatureUrl: z.string().url().optional(),
-    lat: z.number(), lng: z.number(), capturedAt: z.coerce.date().default(() => new Date()), clientId: z.string().optional() }).parse(req.body);
-  res.json({ ...(await completeDelivery(req.params.id, me(req), b)), messageAr: 'تم تسليم الطلب بنجاح' });
-}));
-driverRouter.post('/orders/:id/fail', ah(async (req, res) => {
-  const b = z.object({ reasonCode: z.string(), photoUrl: z.string().url().optional(), lat: z.number(), lng: z.number() }).parse(req.body);
-  const o = await prisma.order.findFirst({ where: { id: req.params.id, driverId: me(req) } }); if (!o) throw E.notFound('الطلب');
-  await failDelivery(o.id, { type: 'DRIVER', id: me(req), lat: b.lat, lng: b.lng }, b.reasonCode, b.photoUrl);
-  res.json({ ok: true });
-}));
-driverRouter.post('/orders/:id/return', ah(async (req, res) => {
-  const b = z.object({ lat: z.number(), lng: z.number() }).parse(req.body);
-  const o = await prisma.order.findFirst({ where: { id: req.params.id, driverId: me(req) } }); if (!o) throw E.notFound('الطلب');
-  if (o.status === 'FAILED_DELIVERY') { await transition(o.id, 'RETURNING', { type: 'DRIVER', id: me(req), ...b }); }
-  else await completeReturn(o.id, { type: 'DRIVER', id: me(req), ...b });
-  res.json({ ok: true });
-}));
-driverRouter.post('/orders/:id/release', ah(async (req, res) => {
-  const { reason } = z.object({ reason: z.string().max(100) }).parse(req.body);
-  const o = await prisma.order.findFirst({ where: { id: req.params.id, driverId: me(req) } }); if (!o) throw E.notFound('الطلب');
-  await releaseDriver(o.id, { type: 'DRIVER', id: me(req) }, reason);
-  res.json({ ok: true });
-}));
-
-driverRouter.post('/orders/:id/rate-customer', ah(async (req, res) => {
-  const b = z.object({ stars: z.number().int().min(1).max(5), comment: z.string().max(500).optional(), reasons: z.array(z.string()).default([]) }).parse(req.body);
-  const o = await prisma.order.findFirst({ where: { id: req.params.id, driverId: me(req), status: { in: ['DELIVERED', 'RETURNED'] } } }); if (!o) throw E.notFound('الطلب');
-  await prisma.rating.create({ data: { orderId: o.id, raterId: req.user!.id, rateeType: 'CUSTOMER', rateeId: o.customerId, ...b } });
-  res.json({ ok: true });
-}));
-
-driverRouter.get('/earnings', ah(async (req, res) => {
-  const from = req.query.from ? new Date(String(req.query.from)) : new Date(Date.now() - 7 * 86400_000);
-  const w = await prisma.wallet.findUnique({ where: { ownerType_ownerId: { ownerType: 'DRIVER', ownerId: me(req) } } });
-  const tx = w ? await prisma.walletTransaction.findMany({ where: { walletId: w.id, createdAt: { gte: from } }, orderBy: { createdAt: 'desc' }, take: 200 }) : [];
-  const sum = (t: string) => tx.filter((x) => x.type === t).reduce((s, x) => s + x.amount, 0);
-  const comm = await prisma.commission.aggregate({ where: { driverId: me(req), createdAt: { gte: from } }, _sum: { commission: true, driverEarning: true }, _count: true });
-  res.json({ balance: w?.balance ?? 0, owesPlatform: Math.max(0, -(w?.balance ?? 0)), cashCollected: -sum('COD_CASH_COLLECTED'), earnings: sum('DELIVERY_EARNING') + sum('RETURN_EARNING'),
-    commission: comm._sum.commission ?? 0, deliveries: comm._count, settlements: sum('SETTLEMENT'), transactions: tx });
-}));
+driverRouter.post('/orders/:id/status', ah(async (req, res) => { const b = z.object({ to: STEP, lat: z.number(), lng: z.number(), photoUrl: z.string().url().optional(), clientId: z.string().optional() }).parse(req.body); const o = await prisma.order.findFirst({ where: { id: req.params.id, driverId: me(req) } }); if (!o) throw E.notFound('الطلب'); if (o.status === b.to) return res.json({ ok: true, idempotent: true }); await transition(o.id, b.to, { type: 'DRIVER', id: me(req), lat: b.lat, lng: b.lng }); if (b.to === 'PACKAGE_PICKED_UP' && b.photoUrl) await prisma.deliveryProof.create({ data: { orderId: o.id, kind: 'PICKUP', photoUrl: b.photoUrl, lat: b.lat, lng: b.lng, capturedAt: new Date(), clientId: b.clientId } }); res.json({ ok: true }); }));
+driverRouter.post('/orders/:id/deliver', ah(async (req, res) => { const b = z.object({ otp: z.string().optional(), recipientName: z.string().max(80).optional(), photoUrl: z.string().url().optional(), signatureUrl: z.string().url().optional(), lat: z.number(), lng: z.number(), capturedAt: z.coerce.date().default(() => new Date()), clientId: z.string().optional() }).parse(req.body); res.json({ ...(await completeDelivery(req.params.id, me(req), b)), messageAr: 'تم تسليم الطلب بنجاح' }); }));
+driverRouter.post('/orders/:id/fail', ah(async (req, res) => { const b = z.object({ reasonCode: z.string(), photoUrl: z.string().url().optional(), lat: z.number(), lng: z.number() }).parse(req.body); const o = await prisma.order.findFirst({ where: { id: req.params.id, driverId: me(req) } }); if (!o) throw E.notFound('الطلب'); await failDelivery(o.id, { type: 'DRIVER', id: me(req), lat: b.lat, lng: b.lng }, b.reasonCode, b.photoUrl); res.json({ ok: true }); }));
+driverRouter.post('/orders/:id/return', ah(async (req, res) => { const b = z.object({ lat: z.number(), lng: z.number() }).parse(req.body); const o = await prisma.order.findFirst({ where: { id: req.params.id, driverId: me(req) } }); if (!o) throw E.notFound('الطلب'); if (o.status === 'FAILED_DELIVERY') await transition(o.id, 'RETURNING', { type: 'DRIVER', id: me(req), ...b }); else await completeReturn(o.id, { type: 'DRIVER', id: me(req), ...b }); res.json({ ok: true }); }));
+driverRouter.post('/orders/:id/release', ah(async (req, res) => { const { reason } = z.object({ reason: z.string().max(100) }).parse(req.body); const o = await prisma.order.findFirst({ where: { id: req.params.id, driverId: me(req) } }); if (!o) throw E.notFound('الطلب'); await releaseDriver(o.id, { type: 'DRIVER', id: me(req) }, reason); res.json({ ok: true }); }));
+driverRouter.post('/orders/:id/rate-customer', ah(async (req, res) => { const b = z.object({ stars: z.number().int().min(1).max(5), comment: z.string().max(500).optional(), reasons: z.array(z.string()).default([]) }).parse(req.body); const o = await prisma.order.findFirst({ where: { id: req.params.id, driverId: me(req), status: { in: ['DELIVERED', 'RETURNED'] } } }); if (!o) throw E.notFound('الطلب'); await prisma.rating.create({ data: { orderId: o.id, raterId: req.user!.id, rateeType: 'CUSTOMER', rateeId: o.customerId, ...b } }); res.json({ ok: true }); }));
+driverRouter.get('/earnings', ah(async (req, res) => { const from = req.query.from ? new Date(String(req.query.from)) : new Date(Date.now() - 7 * 86400_000); if (Number.isNaN(+from)) throw E.bad('BAD_RANGE', 'تاريخ غير صالح'); const w = await prisma.wallet.findUnique({ where: { ownerType_ownerId: { ownerType: 'DRIVER', ownerId: me(req) } } }); const tx = w ? await prisma.walletTransaction.findMany({ where: { walletId: w.id, createdAt: { gte: from } }, orderBy: { createdAt: 'desc' }, take: 200 }) : []; const sum = (t: string) => tx.filter((x) => x.type === t).reduce((s, x) => s + x.amount, 0); const comm = await prisma.commission.aggregate({ where: { driverId: me(req), createdAt: { gte: from } }, _sum: { commission: true, driverEarning: true }, _count: true }); res.json({ balance: w?.balance ?? 0, owesPlatform: Math.max(0, -(w?.balance ?? 0)), cashCollected: -sum('COD_CASH_COLLECTED'), earnings: sum('DELIVERY_EARNING') + sum('RETURN_EARNING'), commission: comm._sum.commission ?? 0, deliveries: comm._count, settlements: sum('SETTLEMENT'), transactions: tx }); }));

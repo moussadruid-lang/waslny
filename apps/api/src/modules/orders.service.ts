@@ -9,6 +9,7 @@ import { notify, sendSms } from './notify.ts';
 import { emit } from './realtime.ts';
 import { queues } from '../jobs/queues.ts';
 import { getSetting } from './settings.ts';
+import { newTrackingToken } from './tracking.ts';
 import { env } from '../config.ts';
 
 export interface StopInput { lat: number; lng: number; formatted?: string; description?: string; landmark?: string; contactName?: string; contactPhone?: string; instructions?: string; photoUrl?: string }
@@ -16,6 +17,8 @@ export interface CreateOrderInput {
   customerId: string; businessId?: string | null; pickup: StopInput; dropoffs: StopInput[];
   vehicleTypeCode: string; packageSizeCode: string; categoryCode: string; weightKg: number; notes?: string; packagePhotoUrl?: string;
   urgent: boolean; scheduledAt?: Date | null; couponCode?: string | null; paymentMethod: 'CASH' | 'WALLET'; codAmount?: number;
+  /** Who created it, for the timeline (business staff / API key / customer). */
+  actor?: { type: Actor; id?: string };
 }
 
 const orderCode = () => `MSH-${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
@@ -24,15 +27,17 @@ export async function createOrder(i: CreateOrderInput) {
   await assertAcceptingOrders();
   const cat = await prisma.packageCategory.findFirst({ where: { code: i.categoryCode, active: true } });
   if (!cat) throw E.bad('BAD_CATEGORY', 'نوع الشحنة غير متاح');
+  // businessId is passed so business-scoped coupons are validated against the right tenant.
   const q = await buildQuote({ pickup: i.pickup, dropoffs: i.dropoffs, vehicleTypeCode: i.vehicleTypeCode, packageSizeCode: i.packageSizeCode,
-    weightKg: i.weightKg, urgent: i.urgent, scheduledAt: i.scheduledAt, couponCode: i.couponCode, userId: i.customerId });
+    weightKg: i.weightKg, urgent: i.urgent, scheduledAt: i.scheduledAt, couponCode: i.couponCode, userId: i.customerId, businessId: i.businessId ?? null });
 
   const proof = await getSetting('delivery_proof');
   const otp = proof.requireOtp ? crypto.randomInt(1000, 10000).toString() : null;
+  const actor = i.actor ?? { type: (i.businessId ? 'BUSINESS' : 'CUSTOMER') as Actor, id: i.customerId };
 
   const order = await prisma.$transaction(async (tx) => {
     const o = await tx.order.create({ data: {
-      code: orderCode(), trackingToken: crypto.randomBytes(16).toString('base64url'), customerId: i.customerId, businessId: i.businessId ?? null,
+      code: orderCode(), trackingToken: newTrackingToken(), customerId: i.customerId, businessId: i.businessId ?? null,
       vehicleTypeCode: i.vehicleTypeCode, packageSizeCode: i.packageSizeCode, categoryCode: i.categoryCode, weightKg: i.weightKg,
       notes: i.notes, packagePhotoUrl: i.packagePhotoUrl, urgent: i.urgent, scheduledAt: i.scheduledAt ?? null,
       distanceKm: q.distanceKm, priceBreakdown: q.lines as any, subtotal: q.subtotal, discount: q.discount, total: q.total,
@@ -42,7 +47,7 @@ export async function createOrder(i: CreateOrderInput) {
         { seq: 0, type: 'PICKUP', ...i.pickup, geoUnitId: q.pickupGeo.unit.id, governorateId: q.pickupGeo.governorateId, cityId: q.pickupGeo.cityId },
         ...i.dropoffs.map((d, n) => ({ seq: n + 1, type: 'DROPOFF' as const, ...d, geoUnitId: q.dropGeos[n].unit.id, governorateId: q.dropGeos[n].governorateId, cityId: q.dropGeos[n].cityId })),
       ] },
-      history: { create: { toStatus: 'NEW', actorType: 'CUSTOMER', actorId: i.customerId, lat: i.pickup.lat, lng: i.pickup.lng } },
+      history: { create: { toStatus: 'NEW', actorType: actor.type, actorId: actor.id, lat: i.pickup.lat, lng: i.pickup.lng } },
       chat: { create: {} },
       payments: { create: { method: i.paymentMethod, provider: i.paymentMethod === 'CASH' ? 'cash' : 'wallet', amount: q.total } },
     } });
@@ -57,6 +62,7 @@ export async function createOrder(i: CreateOrderInput) {
   });
 
   await notify(i.customerId, { type: 'ORDER_CREATED', titleAr: 'مشاوير', bodyAr: STATUS_MESSAGES_AR.NEW, deepLink: `mashawir://orders/${order.id}` });
+  emit('ops', 'order:new', { orderId: order.id, code: order.code });
   const recipientPhone = i.dropoffs[0].contactPhone;
   if (recipientPhone) await sendSms(recipientPhone, `لديك شحنة من مشاوير. تتبعها: ${env.PUBLIC_TRACKING_BASE_URL}/${order.trackingToken}${otp ? ` — كود الاستلام: ${otp}` : ''}`);
 
@@ -68,9 +74,9 @@ export async function createOrder(i: CreateOrderInput) {
   return { order, quote: q, deliveryOtp: otp };
 }
 
-export async function startDispatch(orderId: string) {
-  await transition(orderId, 'SEARCHING_DRIVER', { type: 'SYSTEM' });
-  await queues.dispatch.add('wave', { orderId, wave: 0 }, { jobId: `wave:${orderId}:0` });
+export async function startDispatch(orderId: string, actor: { type: Actor; id?: string } = { type: 'SYSTEM' }) {
+  await transition(orderId, 'SEARCHING_DRIVER', actor);
+  await queues.dispatch.add('wave', { orderId, wave: 0 }, { jobId: `wave:${orderId}:0:${Date.now()}` });
 }
 
 /**
@@ -94,50 +100,56 @@ export async function transition(orderId: string, to: OrderStatus, actor: { type
 
 export async function afterTransition(orderId: string, to: OrderStatus) {
   const o = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, include: { driver: { include: { user: true } } } });
-  const payload = { orderId, code: o.code, status: to, messageAr: STATUS_MESSAGES_AR[to], driverName: o.driver?.user.name };
+  const payload = { orderId, code: o.code, status: to, messageAr: STATUS_MESSAGES_AR[to], driverName: o.driver?.user.name, driverId: o.driverId, at: new Date() };
   emit(`order:${orderId}`, 'order:status', payload);
-  emit(`track:${o.trackingToken}`, 'order:status', { code: o.code, status: to, messageAr: STATUS_MESSAGES_AR[to] });
+  // Public room gets no ids / names: the page refetches the redacted view.
+  emit(`track:${o.trackingToken}`, 'order:status', { code: o.code, status: to, messageAr: STATUS_MESSAGES_AR[to], at: new Date() });
   emit('ops', 'order:status', payload);
   const body = to === 'DRIVER_ASSIGNED' && o.driver?.user.name ? `تم تعيين المندوب ${o.driver.user.name}` : STATUS_MESSAGES_AR[to];
   await notify(o.customerId, { type: `ORDER_${to}`, titleAr: 'مشاوير', bodyAr: body, deepLink: `mashawir://orders/${orderId}` });
+  // Worker fans this out to one retriable delivery per subscribed webhook.
   if (o.businessId) await queues.webhooks.add('event', { businessId: o.businessId, event: `order.${to.toLowerCase()}`, orderId });
 }
 
 /**
  * Atomic accept: exactly one driver can win. Two guarded updateMany calls inside one transaction:
  * order must still be SEARCHING with no driver; driver must still be under capacity. Loser gets 409.
+ * `byOps` = manual assignment from Live Ops (timeline actor OPERATIONS, offer not required).
  */
-export async function acceptOffer(orderId: string, driverId: string) {
+export async function acceptOffer(orderId: string, driverId: string, byOps?: { userId: string; reason?: string }) {
   const settings = await getSetting('dispatch');
   await prisma.$transaction(async (tx) => {
     const offer = await tx.dispatchOffer.findUnique({ where: { orderId_driverId: { orderId, driverId } } });
-    if (!offer || offer.status !== 'PENDING' || offer.expiresAt < new Date()) throw E.conflict('OFFER_EXPIRED', 'انتهى هذا العرض');
+    if (!byOps && (!offer || offer.status !== 'PENDING' || offer.expiresAt < new Date())) throw E.conflict('OFFER_EXPIRED', 'انتهى هذا العرض');
     const driver = await tx.driver.findUniqueOrThrow({ where: { id: driverId } });
-    if (driver.status !== 'APPROVED' || !driver.online) throw E.forbidden();
+    if (driver.status !== 'APPROVED' || (!byOps && !driver.online)) throw byOps ? E.bad('DRIVER_NOT_APPROVED', 'المندوب غير معتمد') : E.forbidden();
 
     const won = await tx.order.updateMany({ where: { id: orderId, status: 'SEARCHING_DRIVER', driverId: null }, data: { status: 'DRIVER_ASSIGNED', driverId, version: { increment: 1 } } });
-    if (won.count !== 1) throw E.conflict('ORDER_TAKEN', 'تم قبول الطلب من مندوب آخر');
+    if (won.count !== 1) throw E.conflict('ORDER_TAKEN', byOps ? 'تغيرت حالة الطلب، حدّث الصفحة' : 'تم قبول الطلب من مندوب آخر');
     const cap = await tx.driver.updateMany({ where: { id: driverId, activeOrders: { lt: settings.maxActiveOrdersPerDriver } }, data: { activeOrders: { increment: 1 } } });
-    if (cap.count !== 1) throw E.conflict('DRIVER_BUSY', 'لديك طلب نشط بالفعل'); // rolls back the order update too
+    if (cap.count !== 1) throw E.conflict('DRIVER_BUSY', byOps ? 'المندوب وصل للحد الأقصى من الطلبات النشطة' : 'لديك طلب نشط بالفعل'); // rolls back the order update too
 
-    await tx.dispatchOffer.update({ where: { id: offer.id }, data: { status: 'ACCEPTED', respondedAt: new Date() } });
+    if (offer) await tx.dispatchOffer.update({ where: { id: offer.id }, data: { status: 'ACCEPTED', respondedAt: new Date() } });
+    else await tx.dispatchOffer.create({ data: { orderId, driverId, wave: 99, distanceKm: 0, status: 'ACCEPTED', respondedAt: new Date(), expiresAt: new Date() } });
     await tx.dispatchOffer.updateMany({ where: { orderId, status: 'PENDING' }, data: { status: 'CANCELLED' } });
-    await tx.orderStatusHistory.create({ data: { orderId, fromStatus: 'SEARCHING_DRIVER', toStatus: 'DRIVER_ASSIGNED', actorType: 'DRIVER', actorId: driverId, lat: driver.lastLat, lng: driver.lastLng } });
+    await tx.orderStatusHistory.create({ data: { orderId, fromStatus: 'SEARCHING_DRIVER', toStatus: 'DRIVER_ASSIGNED', actorType: byOps ? 'OPERATIONS' : 'DRIVER', actorId: byOps?.userId ?? driverId, lat: driver.lastLat, lng: driver.lastLng, reason: byOps?.reason } });
   });
   emit('ops', 'offers:closed', { orderId });
+  if (byOps) emit(`driver:${driverId}`, 'order:assigned', { orderId });
   await afterTransition(orderId, 'DRIVER_ASSIGNED');
 }
 
-/** Driver releases the order (or ops reassigns): back to the pool. */
-export async function releaseDriver(orderId: string, actor: { type: Actor; id?: string }, reason: string) {
+/** Driver releases the order (or ops reassigns): back to the pool. `redispatch=false` keeps it out of auto-dispatch (manual assignment follows). */
+export async function releaseDriver(orderId: string, actor: { type: Actor; id?: string }, reason: string, redispatch = true) {
   const o = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
   if (!o.driverId) throw E.bad('NO_DRIVER', 'لا يوجد مندوب على الطلب');
   await prisma.$transaction(async (tx) => {
     await transition(orderId, 'SEARCHING_DRIVER', actor, { reason, data: { driverId: null, dispatchWave: 0 } }, tx);
     await tx.driver.update({ where: { id: o.driverId! }, data: { activeOrders: { decrement: 1 } } });
   });
+  emit(`driver:${o.driverId}`, 'order:released', { orderId, reason });
   await afterTransition(orderId, 'SEARCHING_DRIVER');
-  await queues.dispatch.add('wave', { orderId, wave: 0 }, { jobId: `wave:${orderId}:0:${Date.now()}` });
+  if (redispatch) await queues.dispatch.add('wave', { orderId, wave: 0 }, { jobId: `wave:${orderId}:0:${Date.now()}` });
 }
 
 /** Proof of delivery + payment settlement + commission + wallet updates, all in ONE transaction. */
@@ -195,7 +207,7 @@ async function resolveCommissionRule(o: { vehicleTypeCode: string; businessId: s
 export async function failDelivery(orderId: string, actor: { type: Actor; id: string; lat?: number; lng?: number }, reasonCode: string, photoUrl?: string) {
   const reason = await prisma.failureReason.findUnique({ where: { code: reasonCode } });
   if (!reason) throw E.bad('BAD_REASON', 'سبب غير معروف');
-  if (reason.requiresPhoto && !photoUrl) throw E.bad('PHOTO_REQUIRED', 'الصورة مطلوبة لهذا السبب');
+  if (reason.requiresPhoto && !photoUrl && actor.type === 'DRIVER') throw E.bad('PHOTO_REQUIRED', 'الصورة مطلوبة لهذا السبب');
   await prisma.$transaction(async (tx) => {
     await transition(orderId, 'FAILED_DELIVERY', actor, { reason: reasonCode, data: { failReason: reasonCode } }, tx);
     if (photoUrl) await tx.deliveryProof.create({ data: { orderId, kind: 'FAILURE', photoUrl, lat: actor.lat, lng: actor.lng, capturedAt: new Date() } });
@@ -205,6 +217,10 @@ export async function failDelivery(orderId: string, actor: { type: Actor; id: st
   if (reason.nextAction === 'RETURN') await transition(orderId, 'RETURNING', { type: 'SYSTEM' }, { reason: 'auto-return' });
 }
 
+/**
+ * Return fee uses the pricing rule version the order was priced with (rules are versioned, never edited in place),
+ * so changing today's pricing can never change what an old order is charged.
+ */
 export async function completeReturn(orderId: string, actor: { type: Actor; id: string; lat?: number; lng?: number }) {
   const o = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
   const rule = await prisma.pricingRule.findUniqueOrThrow({ where: { id: o.pricingRuleId } });
@@ -232,7 +248,9 @@ export async function cancelOrder(orderId: string, actor: { type: Actor; id: str
     if (o.paymentMethod === 'WALLET') await post(tx, { ownerType: 'CUSTOMER', ownerId: o.customerId, type: 'REFUND', amount: o.total, orderId, idempotencyKey: `cancel:${orderId}:refund` });
     if (o.couponId) await tx.coupon.update({ where: { id: o.couponId }, data: { usedCount: { decrement: 1 } } });
     await tx.couponRedemption.deleteMany({ where: { orderId } });
+    await tx.payment.updateMany({ where: { orderId, status: 'PENDING' }, data: { status: 'FAILED' } });
   });
+  if (o.driverId) emit(`driver:${o.driverId}`, 'order:cancelled', { orderId, reason });
   await afterTransition(orderId, 'CANCELLED');
 }
 
