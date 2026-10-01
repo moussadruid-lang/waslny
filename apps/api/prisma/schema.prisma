@@ -1,0 +1,760 @@
+// مشاوير — Database schema (PostgreSQL). Money = Int piasters. All config is data, never code.
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+enum DriverStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+enum OrderStatus {
+  NEW
+  SEARCHING_DRIVER
+  DRIVER_ASSIGNED
+  DRIVER_GOING_TO_PICKUP
+  DRIVER_ARRIVED_PICKUP
+  PACKAGE_PICKED_UP
+  IN_DELIVERY
+  DRIVER_ARRIVED_DESTINATION
+  DELIVERED
+  CANCELLED
+  FAILED_DELIVERY
+  RETURNING
+  RETURNED
+}
+enum PaymentMethod {
+  CASH
+  WALLET
+  CARD
+  MOBILE_WALLET
+}
+enum PaymentStatus {
+  PENDING
+  AUTHORIZED
+  PAID
+  FAILED
+  REFUNDED
+}
+enum StopType {
+  PICKUP
+  DROPOFF
+  RETURN
+}
+enum WalletOwnerType {
+  CUSTOMER
+  DRIVER
+  BUSINESS
+  PLATFORM
+}
+enum OfferStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  CANCELLED
+}
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  WAITING_USER
+  RESOLVED
+  CLOSED
+}
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+enum GeoLevel {
+  GOVERNORATE
+  CITY
+  DISTRICT
+  VILLAGE
+  AREA
+}
+
+// ---------- Identity & RBAC ----------
+model User {
+  id            String     @id @default(cuid())
+  phone         String     @unique
+  email         String?    @unique
+  name          String?
+  avatarUrl     String?
+  passwordHash  String?
+  status        UserStatus @default(ACTIVE)
+  referralCode  String     @unique
+  referredById  String?
+  referredBy    User?      @relation("Referrals", fields: [referredById], references: [id])
+  referrals     User[]     @relation("Referrals")
+  roles         UserRole[]
+  driver        Driver?
+  businessUsers BusinessUser[]
+  addresses     Address[]
+  sessions      Session[]
+  devices       Device[]
+  orders        Order[]    @relation("CustomerOrders")
+  notifications Notification[]
+  notificationPrefs Json   @default("{}")
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  deletedAt     DateTime?
+}
+
+model Role {
+  id          String           @id @default(cuid())
+  code        String           @unique // SUPER_ADMIN, ADMIN, OPERATIONS, FINANCE, SUPPORT, DRIVER, CUSTOMER, BUSINESS
+  nameAr      String
+  permissions RolePermission[]
+  users       UserRole[]
+}
+model Permission {
+  id    String           @id @default(cuid())
+  code  String           @unique // e.g. orders.read_all, orders.reassign, pricing.write
+  roles RolePermission[]
+}
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  @@id([roleId, permissionId])
+}
+model UserRole {
+  userId String
+  roleId String
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  @@id([userId, roleId])
+}
+model OtpCode {
+  id        String   @id @default(cuid())
+  phone     String
+  codeHash  String
+  purpose   String   // LOGIN, CHANGE_PHONE, DELIVERY
+  attempts  Int      @default(0)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+  @@index([phone, purpose, createdAt])
+}
+model Session {
+  id               String   @id @default(cuid())
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshTokenHash String   @unique
+  userAgent        String?
+  ip               String?
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  createdAt        DateTime @default(now())
+}
+model Device {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pushToken String   @unique
+  platform  String
+  updatedAt DateTime @updatedAt
+}
+
+// ---------- Geography (fully admin-managed) ----------
+model GeoUnit {
+  id         String    @id @default(cuid())
+  level      GeoLevel
+  nameAr     String
+  nameEn     String?
+  parentId   String?
+  parent     GeoUnit?  @relation("GeoTree", fields: [parentId], references: [id])
+  children   GeoUnit[] @relation("GeoTree")
+  centerLat  Float?
+  centerLng  Float?
+  radiusKm   Float?    // service coverage radius
+  polygon    Json?     // GeoJSON for precise boundaries (optional)
+  active     Boolean   @default(true)
+  extraFee   Int       @default(0)
+  operatingHours OperatingHours[]
+  @@index([parentId])
+  @@index([level, active])
+}
+
+model OperatingHours {
+  id        String   @id @default(cuid())
+  scope     String   // PLATFORM | GEO | DRIVER
+  geoUnitId String?
+  geoUnit   GeoUnit? @relation(fields: [geoUnitId], references: [id])
+  driverId  String?
+  weekday   Int      // 0=Sunday
+  opensAt   String   // "08:00" Africa/Cairo
+  closesAt  String
+  @@index([scope, geoUnitId])
+}
+
+model Address {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label         String   // HOME, WORK, FAVORITE, CUSTOM
+  title         String?
+  lat           Float
+  lng           Float
+  geoUnitId     String?  // deepest matched geo unit
+  formatted     String?
+  description   String?  // "البيت الثالث بعد المسجد"
+  landmark      String?
+  contactPhone  String?
+  photoUrl      String?
+  createdAt     DateTime @default(now())
+}
+
+// ---------- Drivers & vehicles ----------
+model VehicleType {
+  id           String    @id @default(cuid())
+  code         String    @unique // MOTORCYCLE, CAR, VAN, TRUCK, TUKTUK
+  nameAr       String
+  maxKg        Float
+  maxVolumeL   Float?
+  avgSpeedKmh  Float     @default(30)
+  active       Boolean   @default(true)
+  allowedSizes String[]  // package size codes this vehicle can carry
+  vehicles     Vehicle[]
+}
+model Driver {
+  id             String       @id @default(cuid())
+  userId         String       @unique
+  user           User         @relation(fields: [userId], references: [id])
+  status         DriverStatus @default(PENDING)
+  nationalIdNo   String?
+  online         Boolean      @default(false)
+  activeOrders   Int          @default(0)
+  lastLat        Float?
+  lastLng        Float?
+  lastLocationAt DateTime?
+  rating         Float        @default(5)
+  ratingCount    Int          @default(0)
+  acceptanceRate Float        @default(1)
+  serviceAreaIds String[]
+  rejectionReason String?
+  vehicles       Vehicle[]
+  documents      DriverDocument[]
+  orders         Order[]
+  offers         DispatchOffer[]
+  locations      DriverLocation[]
+  createdAt      DateTime     @default(now())
+  @@index([status, online, activeOrders])
+}
+model Vehicle {
+  id            String      @id @default(cuid())
+  driverId      String
+  driver        Driver      @relation(fields: [driverId], references: [id])
+  vehicleTypeId String
+  vehicleType   VehicleType @relation(fields: [vehicleTypeId], references: [id])
+  model         String?
+  plate         String?
+  color         String?
+  isPrimary     Boolean     @default(true)
+}
+model DriverDocument {
+  id        String   @id @default(cuid())
+  driverId  String
+  driver    Driver   @relation(fields: [driverId], references: [id])
+  type      String   // NATIONAL_ID_FRONT, NATIONAL_ID_BACK, LICENSE, VEHICLE_LICENSE, CRIMINAL_RECORD
+  fileUrl   String
+  status    String   @default("PENDING")
+  note      String?
+  createdAt DateTime @default(now())
+}
+model DriverLocation {
+  id        BigInt   @id @default(autoincrement())
+  driverId  String
+  driver    Driver   @relation(fields: [driverId], references: [id])
+  orderId   String?
+  lat       Float
+  lng       Float
+  heading   Float?
+  speed     Float?
+  accuracy  Float?
+  suspicious Boolean @default(false)
+  at        DateTime @default(now())
+  @@index([driverId, at])
+  @@index([orderId, at])
+}
+
+// ---------- Businesses ----------
+model Business {
+  id        String         @id @default(cuid())
+  nameAr    String
+  taxId     String?
+  status    String         @default("ACTIVE")
+  users     BusinessUser[]
+  branches  BusinessBranch[]
+  orders    Order[]
+  apiKeys   ApiKey[]
+  webhooks  Webhook[]
+  createdAt DateTime       @default(now())
+}
+model BusinessUser {
+  businessId String
+  userId     String
+  role       String   // OWNER, MANAGER, STAFF
+  business   Business @relation(fields: [businessId], references: [id])
+  user       User     @relation(fields: [userId], references: [id])
+  @@id([businessId, userId])
+}
+model BusinessBranch {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id])
+  name       String
+  lat        Float
+  lng        Float
+  geoUnitId  String?
+  address    String?
+}
+model ApiKey {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id])
+  prefix     String   @unique
+  keyHash    String
+  scopes     String[]
+  rateLimitPerMin Int @default(60)
+  revokedAt  DateTime?
+  lastUsedAt DateTime?
+  createdAt  DateTime @default(now())
+}
+model Webhook {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id])
+  url        String
+  secret     String   // HMAC signing secret
+  events     String[]
+  active     Boolean  @default(true)
+  deliveries WebhookDelivery[]
+}
+model WebhookDelivery {
+  id         String   @id @default(cuid())
+  webhookId  String
+  webhook    Webhook  @relation(fields: [webhookId], references: [id])
+  event      String
+  payload    Json
+  statusCode Int?
+  attempts   Int      @default(0)
+  succeededAt DateTime?
+  createdAt  DateTime @default(now())
+}
+model BulkUpload {
+  id         String   @id @default(cuid())
+  businessId String
+  fileUrl    String
+  status     String   // QUEUED, PROCESSING, DONE, FAILED
+  totalRows  Int      @default(0)
+  okRows     Int      @default(0)
+  errors     Json     @default("[]")
+  createdAt  DateTime @default(now())
+}
+
+// ---------- Pricing & config ----------
+model PricingRule {
+  id                String  @id @default(cuid())
+  name              String
+  active            Boolean @default(true)
+  priority          Int     @default(0)
+  governorateId     String?
+  cityId            String?
+  areaId            String?
+  vehicleTypeCode   String?
+  baseFare          Int
+  perKm             Int
+  includedKm        Float   @default(0)
+  minimumFare       Int
+  perKgOverIncluded Int     @default(0)
+  includedKg        Float   @default(5)
+  urgentFee         Int     @default(0)
+  scheduledFee      Int     @default(0)
+  extraStopFee      Int     @default(0)
+  waitingPerMinute  Int     @default(0)
+  freeWaitingMinutes Int    @default(10)
+  returnFeePercent  Float   @default(50)
+  updatedAt         DateTime @updatedAt
+}
+model PackageSize {
+  code         String  @id // DOCUMENTS, ENVELOPE, SMALL, MEDIUM, LARGE
+  nameAr       String
+  fee          Int     @default(0)
+  multiplierBp Int     @default(10000)
+  maxKg        Float
+  active       Boolean @default(true)
+}
+model PackageCategory {
+  code   String  @id // DOCUMENTS, CLOTHES, PERSONAL, FOOD, OTHER
+  nameAr String
+  active Boolean @default(true)
+}
+model CommissionRule {
+  id              String  @id @default(cuid())
+  active          Boolean @default(true)
+  vehicleTypeCode String?
+  governorateId   String?
+  businessId      String?
+  type            String  // PERCENT, FIXED, PERCENT_PLUS_FIXED
+  percent         Float   @default(10)
+  fixed           Int     @default(0)
+  min             Int?
+  max             Int?
+}
+model Setting {
+  key       String   @id // dispatch, delivery_proof, platform, referral ...
+  value     Json
+  updatedAt DateTime @updatedAt
+}
+
+// ---------- Orders ----------
+model Order {
+  id              String        @id @default(cuid())
+  code            String        @unique // human readable, e.g. MSH-250101-4F7K
+  trackingToken   String        @unique // public tracking link
+  customerId      String
+  customer        User          @relation("CustomerOrders", fields: [customerId], references: [id])
+  businessId      String?
+  business        Business?     @relation(fields: [businessId], references: [id])
+  driverId        String?
+  driver          Driver?       @relation(fields: [driverId], references: [id])
+  status          OrderStatus   @default(NEW)
+  version         Int           @default(0) // optimistic concurrency
+  vehicleTypeCode String
+  packageSizeCode String
+  categoryCode    String
+  weightKg        Float         @default(1)
+  packagePhotoUrl String?
+  notes           String?
+  urgent          Boolean       @default(false)
+  scheduledAt     DateTime?
+  distanceKm      Float
+  priceBreakdown  Json
+  subtotal        Int
+  discount        Int           @default(0)
+  total           Int
+  codAmount       Int           @default(0) // goods value to collect for merchants
+  couponId        String?
+  pricingRuleId   String
+  paymentMethod   PaymentMethod @default(CASH)
+  deliveryOtpHash String?
+  dispatchWave    Int           @default(0)
+  failReason      String?
+  cancelReason    String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  deliveredAt     DateTime?
+  stops           OrderStop[]
+  items           OrderItem[]
+  history         OrderStatusHistory[]
+  offers          DispatchOffer[]
+  payments        Payment[]
+  proofs          DeliveryProof[]
+  ratings         Rating[]
+  chat            Chat?
+  @@index([status, createdAt])
+  @@index([customerId, createdAt])
+  @@index([driverId, status])
+  @@index([businessId, createdAt])
+  @@index([scheduledAt])
+}
+model OrderItem {
+  id       String @id @default(cuid())
+  orderId  String
+  order    Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  name     String
+  quantity Int    @default(1)
+  value    Int    @default(0)
+}
+model OrderStop {
+  id             String   @id @default(cuid())
+  orderId        String
+  order          Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  seq            Int
+  type           StopType
+  lat            Float
+  lng            Float
+  geoUnitId      String?
+  governorateId  String?
+  cityId         String?
+  formatted      String?
+  description    String?
+  landmark       String?
+  contactName    String?
+  contactPhone   String?
+  instructions   String?
+  photoUrl       String?
+  arrivedAt      DateTime?
+  completedAt    DateTime?
+  @@index([orderId, seq])
+}
+model OrderStatusHistory {
+  id         BigInt       @id @default(autoincrement())
+  orderId    String
+  order      Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  fromStatus OrderStatus?
+  toStatus   OrderStatus
+  actorType  String
+  actorId    String?
+  lat        Float?
+  lng        Float?
+  reason     String?
+  meta       Json?
+  at         DateTime     @default(now())
+  @@index([orderId, at])
+}
+model DispatchOffer {
+  id         String      @id @default(cuid())
+  orderId    String
+  order      Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  driverId   String
+  driver     Driver      @relation(fields: [driverId], references: [id])
+  wave       Int
+  distanceKm Float
+  status     OfferStatus @default(PENDING)
+  expiresAt  DateTime
+  respondedAt DateTime?
+  createdAt  DateTime    @default(now())
+  @@unique([orderId, driverId])
+  @@index([driverId, status])
+}
+model DeliveryProof {
+  id            String   @id @default(cuid())
+  orderId       String
+  order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  kind          String   // DELIVERY, PICKUP, FAILURE, RETURN
+  otpVerified   Boolean  @default(false)
+  recipientName String?
+  photoUrl      String?
+  signatureUrl  String?
+  lat           Float?
+  lng           Float?
+  clientId      String?  @unique // idempotency key from offline driver app
+  capturedAt    DateTime
+  createdAt     DateTime @default(now())
+}
+model FailureReason {
+  code        String  @id // CUSTOMER_ABSENT, REFUSED, PHONE_OFF, WRONG_ADDRESS, UNREACHABLE, MISMATCH, DAMAGED, DRIVER_ISSUE
+  nameAr      String
+  requiresPhoto Boolean @default(false)
+  nextAction  String  // RETRY, RETURN, CONTACT_SUPPORT
+  appliesTo   String  // FAILED_DELIVERY, CANCEL_CUSTOMER, CANCEL_DRIVER
+}
+
+// ---------- Payments & wallets ----------
+model Payment {
+  id          String        @id @default(cuid())
+  orderId     String
+  order       Order         @relation(fields: [orderId], references: [id])
+  method      PaymentMethod
+  provider    String        // cash, wallet, paymob, fawry ... (pluggable)
+  providerRef String?
+  amount      Int
+  status      PaymentStatus @default(PENDING)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+}
+model Wallet {
+  id           String          @id @default(cuid())
+  ownerType    WalletOwnerType
+  ownerId      String          // userId / driverId / businessId / "platform"
+  balance      Int             @default(0) // cached; source of truth = sum(transactions)
+  transactions WalletTransaction[]
+  @@unique([ownerType, ownerId])
+}
+model WalletTransaction {
+  id           String   @id @default(cuid())
+  walletId     String
+  wallet       Wallet   @relation(fields: [walletId], references: [id])
+  type         String   // DEPOSIT, WITHDRAWAL, ORDER_HOLD, DELIVERY_EARNING, COD_CASH_COLLECTED, COMMISSION, SETTLEMENT, REFUND, COUPON_SUBSIDY, REFERRAL_REWARD, ADJUSTMENT
+  amount       Int      // signed piasters
+  balanceAfter Int
+  orderId      String?
+  settlementId String?
+  createdById  String?
+  note         String?
+  idempotencyKey String? @unique
+  createdAt    DateTime @default(now())
+  @@index([walletId, createdAt])
+  @@index([orderId])
+}
+model Commission {
+  id         String @id @default(cuid())
+  orderId    String @unique
+  driverId   String
+  grossFee   Int
+  commission Int
+  driverEarning Int
+  createdAt  DateTime @default(now())
+}
+model Settlement {
+  id          String   @id @default(cuid())
+  driverId    String
+  amount      Int      // positive = driver paid platform
+  method      String
+  reference   String?
+  createdById String
+  createdAt   DateTime @default(now())
+}
+
+// ---------- Engagement ----------
+model Coupon {
+  id          String    @id @default(cuid())
+  code        String    @unique
+  type        String    // PERCENT, FIXED
+  value       Int
+  maxDiscount Int?
+  minOrder    Int?
+  startsAt    DateTime?
+  expiresAt   DateTime?
+  maxUses     Int?
+  maxUsesPerUser Int    @default(1)
+  usedCount   Int       @default(0)
+  userIds     String[]
+  geoUnitIds  String[]
+  active      Boolean   @default(true)
+  redemptions CouponRedemption[]
+}
+model CouponRedemption {
+  id       String @id @default(cuid())
+  couponId String
+  coupon   Coupon @relation(fields: [couponId], references: [id])
+  userId   String
+  orderId  String @unique
+  amount   Int
+  createdAt DateTime @default(now())
+  @@index([couponId, userId])
+}
+model Referral {
+  id         String   @id @default(cuid())
+  referrerId String
+  refereeId  String   @unique
+  rewardedAt DateTime?
+  createdAt  DateTime @default(now())
+}
+// future-ready: points/tiers
+model LoyaltyLedger {
+  id        String   @id @default(cuid())
+  userId    String
+  points    Int
+  reason    String
+  orderId   String?
+  createdAt DateTime @default(now())
+}
+model Rating {
+  id        String   @id @default(cuid())
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id])
+  raterId   String
+  rateeType String   // DRIVER, CUSTOMER
+  rateeId   String
+  stars     Int
+  comment   String?
+  reasons   String[]
+  createdAt DateTime @default(now())
+  @@unique([orderId, raterId])
+}
+
+// ---------- Communication ----------
+model Chat {
+  id       String        @id @default(cuid())
+  orderId  String        @unique
+  order    Order         @relation(fields: [orderId], references: [id])
+  messages ChatMessage[]
+}
+model ChatMessage {
+  id        String   @id @default(cuid())
+  chatId    String
+  chat      Chat     @relation(fields: [chatId], references: [id])
+  senderId  String
+  kind      String   // TEXT, LOCATION, INSTRUCTION, SYSTEM
+  body      String?
+  lat       Float?
+  lng       Float?
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+  @@index([chatId, createdAt])
+}
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  type      String
+  titleAr   String
+  bodyAr    String
+  deepLink  String?
+  data      Json?
+  readAt    DateTime?
+  pushedAt  DateTime?
+  pushError String?
+  createdAt DateTime @default(now())
+  @@index([userId, createdAt])
+}
+
+// ---------- Support ----------
+model SupportTicket {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  userId      String
+  orderId     String?
+  category    String   // ORDER, DRIVER, PAYMENT, ADDRESS, REFUND, OTHER
+  priority    Priority @default(MEDIUM)
+  status      TicketStatus @default(OPEN)
+  assigneeId  String?
+  subject     String
+  messages    TicketMessage[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  @@index([status, priority])
+}
+model TicketMessage {
+  id          String   @id @default(cuid())
+  ticketId    String
+  ticket      SupportTicket @relation(fields: [ticketId], references: [id])
+  senderId    String
+  body        String
+  attachments String[]
+  internal    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+}
+
+// ---------- Security & ops ----------
+model AuditLog {
+  id         BigInt   @id @default(autoincrement())
+  actorId    String?
+  action     String   // pricing.update, order.cancel, wallet.adjust, user.suspend, role.change, settings.update ...
+  entityType String
+  entityId   String?
+  before     Json?
+  after      Json?
+  ip         String?
+  at         DateTime @default(now())
+  @@index([entityType, entityId])
+  @@index([actorId, at])
+}
+model FraudSignal {
+  id        String   @id @default(cuid())
+  kind      String   // GPS_JUMP, MULTI_ACCOUNT_DEVICE, COUPON_ABUSE, PRICE_TAMPER, RAPID_ACCEPT_CANCEL, ABNORMAL_WALLET
+  userId    String?
+  orderId   String?
+  severity  Int      @default(1)
+  details   Json?
+  resolvedAt DateTime?
+  createdAt DateTime @default(now())
+  @@index([kind, createdAt])
+}
