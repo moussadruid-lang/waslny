@@ -1,0 +1,23 @@
+{
+  "name": "@mashawir/mobile-core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared React Native code for مشاوير customer & driver apps",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "peerDependencies": {
+    "@expo/vector-icons": "*",
+    "@react-native-community/netinfo": "*",
+    "expo-constants": "*",
+    "expo-image-manipulator": "*",
+    "expo-image-picker": "*",
+    "expo-location": "*",
+    "expo-notifications": "*",
+    "expo-device": "*",
+    "expo-secure-store": "*",
+    "react": "*",
+    "react-native": "*",
+    "react-native-safe-area-context": "*",
+    "socket.io-client": "*"
+  }
+}

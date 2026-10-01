@@ -11,6 +11,8 @@ const Env = z.object({
   OTP_PEPPER: z.string().min(16),
   CORS_ORIGINS: z.string().default('http://localhost:3000'),
   PUBLIC_TRACKING_BASE_URL: z.string().default('http://localhost:3000/track'),
+  UPLOAD_DIR: z.string().default('./storage/uploads'),
+  PUBLIC_FILES_BASE_URL: z.string().default('http://localhost:4000/files'),
   SMS_PROVIDER: z.enum(['console', 'twilio', 'vonage', 'cequens']).default('console'),
   MAPS_PROVIDER: z.enum(['haversine', 'google', 'osrm', 'mapbox']).default('haversine'),
   MAPS_API_KEY: z.string().optional(),
