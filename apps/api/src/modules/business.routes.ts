@@ -1,7 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { z } from 'zod';
 import crypto from 'node:crypto';
-import rateLimit from 'express-rate-limit';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/db.ts';
 import { ah, E, AppError } from '../lib/errors.ts';
